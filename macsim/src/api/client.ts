@@ -1,6 +1,6 @@
 import type { ApiError } from './types';
 
-const DEFAULT_BASE_URL = 'http://127.0.0.1:8000/api/v1';
+const DEFAULT_BASE_URL = 'http://127.0.0.1:8001/api/v1';
 
 export function getApiBaseUrl(): string {
   const envUrl = import.meta.env.VITE_API_BASE_URL;

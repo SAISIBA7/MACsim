@@ -16,10 +16,9 @@ type ThemePreference = 'light' | 'dark';
 const navigation = [
   { to: '/', label: 'Home', end: true },
   { to: '/simulations/new', label: 'New Simulation' },
-  { to: '/simulations', label: 'Simulations', end: true },
+  { to: '/simulations', label: 'Simulation History', end: true },
   { to: '/comparisons', label: 'Comparisons' },
   { to: '/learning', label: 'Learning Center' },
-  { to: '/history', label: 'History' },
   { to: '/settings', label: 'Settings' },
 ];
 
@@ -120,11 +119,11 @@ export default function App() {
           <Routes>
             <Route path="/" element={<Home />} />
             <Route path="/simulations/new" element={<NewSim />} />
-            <Route path="/simulations" element={<History title="Simulations" />} />
+            <Route path="/simulations" element={<History title="Simulation History" />} />
             <Route path="/simulations/:id" element={<SimulationRoute />} />
             <Route path="/comparisons" element={<Comparisons />} />
             <Route path="/learning" element={<Learning />} />
-            <Route path="/history" element={<History title="History" />} />
+            <Route path="/history" element={<Navigate to="/simulations" replace />} />
             <Route path="/settings" element={<Settings theme={theme} setTheme={setTheme} />} />
             <Route path="/terms" element={<Terms />} />
             <Route path="/privacy" element={<Privacy />} />

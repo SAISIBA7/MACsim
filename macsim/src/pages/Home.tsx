@@ -241,8 +241,8 @@ export default function Home() {
             <h2 className="section-heading" id="recent-heading">Recent Simulations</h2>
             <p className="section-subtext">Experiments configured and recorded in the database or local storage.</p>
           </div>
-          <Link className="btn" to="/history">
-            View All History
+          <Link className="btn" to="/simulations">
+            View Simulation History
           </Link>
         </div>
 
