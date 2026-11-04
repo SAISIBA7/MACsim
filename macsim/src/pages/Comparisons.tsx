@@ -1,23 +1,126 @@
 import { useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { getRuns, type RunRecord } from '../store/runs';
 import { formatNumber, formatProtocol } from '../utils/format';
+import type { Protocol } from '../types';
 
-function sameConditions(runs: RunRecord[]): boolean {
-  if (runs.length < 2) return false;
+type MetricKey =
+  | 'throughputBps'
+  | 'collisions'
+  | 'retransmissions'
+  | 'channelUtilization'
+  | 'averageDelayMs'
+  | 'successfulFrames';
+
+interface MetricMeta {
+  key: MetricKey;
+  label: string;
+  unit: string;
+  fractionDigits: number;
+}
+
+const metricsList: MetricMeta[] = [
+  { key: 'throughputBps', label: 'Throughput', unit: 'bps', fractionDigits: 1 },
+  { key: 'collisions', label: 'Collision Incidents', unit: 'events', fractionDigits: 0 },
+  { key: 'retransmissions', label: 'Retransmissions', unit: 'frames', fractionDigits: 0 },
+  { key: 'channelUtilization', label: 'Channel Utilization', unit: '%', fractionDigits: 1 },
+  { key: 'averageDelayMs', label: 'Average Delay', unit: 'ms', fractionDigits: 2 },
+  { key: 'successfulFrames', label: 'Successful Frames', unit: 'frames', fractionDigits: 0 },
+];
+
+const protocolColors: Record<Protocol, string> = {
+  PURE_ALOHA: '#DDB487',
+  SLOTTED_ALOHA: '#78A9E8',
+  CSMA: '#78B978',
+  CSMA_CD: '#D5A45D',
+};
+
+function checkMatchingConditions(runs: RunRecord[]): {
+  isFair: boolean;
+  differences: string[];
+} {
+  if (runs.length < 2) return { isFair: true, differences: [] };
   const first = runs[0].config;
-  return runs.slice(1).every(({ config }) =>
-    config.stationCount === first.stationCount &&
-    config.frameSizeBytes === first.frameSizeBytes &&
-    config.dataRateBps === first.dataRateBps &&
-    config.durationMs === first.durationMs &&
-    config.trafficModel === first.trafficModel &&
-    config.trafficIntensity === first.trafficIntensity &&
-    config.randomSeed === first.randomSeed,
-  );
+  const differences: string[] = [];
+
+  const diffStations = runs.some(r => r.config.stationCount !== first.stationCount);
+  const diffFrame = runs.some(r => r.config.frameSizeBytes !== first.frameSizeBytes);
+  const diffRate = runs.some(r => r.config.dataRateBps !== first.dataRateBps);
+  const diffDuration = runs.some(r => r.config.durationMs !== first.durationMs);
+  const diffModel = runs.some(r => r.config.trafficModel !== first.trafficModel);
+  const diffIntensity = runs.some(r => r.config.trafficIntensity !== first.trafficIntensity);
+  const diffSeed = runs.some(r => r.config.randomSeed !== first.randomSeed);
+
+  if (diffStations) differences.push('Station count');
+  if (diffFrame) differences.push('Frame size');
+  if (diffRate) differences.push('Data rate');
+  if (diffDuration) differences.push('Duration');
+  if (diffModel) differences.push('Traffic model');
+  if (diffIntensity) differences.push('Traffic intensity');
+  if (diffSeed) differences.push('Random seed');
+
+  return {
+    isFair: differences.length === 0,
+    differences,
+  };
+}
+
+function generateKeyInsight(selectedRuns: RunRecord[], activeMetric: MetricKey): string {
+  if (selectedRuns.length < 2) {
+    return 'Select at least two simulation runs to generate comparative protocol insights.';
+  }
+
+  const { isFair, differences } = checkMatchingConditions(selectedRuns);
+  if (!isFair) {
+    return `Caution: The compared experiments vary in ${differences.join(', ')}. Outcome variances reflect different experimental workloads rather than protocol mechanisms alone.`;
+  }
+
+  const pureAloha = selectedRuns.find(r => r.config.protocol === 'PURE_ALOHA');
+  const slottedAloha = selectedRuns.find(r => r.config.protocol === 'SLOTTED_ALOHA');
+  const csma = selectedRuns.find(r => r.config.protocol === 'CSMA');
+  const csmaCd = selectedRuns.find(r => r.config.protocol === 'CSMA_CD');
+
+  if (activeMetric === 'throughputBps' && pureAloha && slottedAloha) {
+    const s1 = pureAloha.metrics.throughputBps ?? 0;
+    const s2 = slottedAloha.metrics.throughputBps ?? 0;
+    if (s1 > 0) {
+      const pct = (((s2 - s1) / s1) * 100).toFixed(1);
+      return `Under matching workload, Slotted ALOHA achieved a throughput difference of ${pct}% relative to Pure ALOHA due to slot boundary synchronization halving the vulnerable interval from 2T to T.`;
+    }
+  }
+
+  if (activeMetric === 'collisions' && (pureAloha || slottedAloha) && csma) {
+    const alohaCol = (slottedAloha ?? pureAloha)!.metrics.collisions;
+    const csmaCol = csma.metrics.collisions;
+    return `Carrier sensing reduced collision incidents from ${alohaCol} in ALOHA to ${csmaCol} in CSMA by verifying channel idle state before attempting transmission.`;
+  }
+
+  if (activeMetric === 'averageDelayMs' && csmaCd && csma) {
+    const cdDelay = csmaCd.metrics.averageDelayMs;
+    const csDelay = csma.metrics.averageDelayMs;
+    if (cdDelay !== undefined && csDelay !== undefined) {
+      return `CSMA/CD recorded an average frame delivery delay of ${cdDelay.toFixed(2)} ms versus ${csDelay.toFixed(2)} ms for CSMA as collision aborting expedited queue re-arbitration.`;
+    }
+  }
+
+  const sorted = [...selectedRuns].sort((a, b) => {
+    const va = (a.metrics[activeMetric] as number | undefined) ?? 0;
+    const vb = (b.metrics[activeMetric] as number | undefined) ?? 0;
+    return vb - va;
+  });
+
+  const best = sorted[0];
+  const lowest = sorted[sorted.length - 1];
+  const bestVal = (best.metrics[activeMetric] as number | undefined) ?? 0;
+  const lowestVal = (lowest.metrics[activeMetric] as number | undefined) ?? 0;
+
+  return `Across the ${selectedRuns.length} matching runs, ${formatProtocol(best.config.protocol)} recorded the highest ${activeMetric} (${formatNumber(bestVal, 1)}), compared to ${formatProtocol(lowest.config.protocol)} (${formatNumber(lowestVal, 1)}).`;
 }
 
 export default function Comparisons() {
+  const [searchParams] = useSearchParams();
+  const requestedIds = searchParams.get('ids')?.split(',').filter(Boolean);
+
   const [{ runs, error }] = useState(() => {
     try {
       return { runs: getRuns(), error: '' };
@@ -28,166 +131,419 @@ export default function Comparisons() {
       };
     }
   });
-  const [chosenIds, setChosenIds] = useState<string[] | null>(null);
-  const selectedIds = chosenIds ?? runs.slice(0, 2).map(run => run.id);
+
+  const [selectedIds, setSelectedIds] = useState<string[]>(() => {
+    if (requestedIds && requestedIds.length > 0) {
+      return requestedIds;
+    }
+    return runs.slice(0, 2).map(r => r.id);
+  });
+
+  const [activeMetricKey, setActiveMetricKey] = useState<MetricKey>('throughputBps');
 
   const selectedRuns = useMemo(
     () => runs.filter(run => selectedIds.includes(run.id)),
     [runs, selectedIds],
   );
-  const comparable = sameConditions(selectedRuns);
-  const maxThroughput = Math.max(0, ...selectedRuns.map(run => run.metrics.throughputBps ?? 0));
+
+  const { isFair, differences } = checkMatchingConditions(selectedRuns);
+  const activeMetricMeta = metricsList.find(m => m.key === activeMetricKey)!;
+  const keyInsight = useMemo(
+    () => generateKeyInsight(selectedRuns, activeMetricKey),
+    [selectedRuns, activeMetricKey],
+  );
 
   const toggleRun = (id: string) => {
-    setChosenIds(current => (current ?? selectedIds).includes(id)
-      ? (current ?? selectedIds).filter(selected => selected !== id)
-      : [...(current ?? selectedIds), id]);
+    setSelectedIds(curr =>
+      curr.includes(id) ? curr.filter(item => item !== id) : [...curr, id],
+    );
   };
 
+  const metricValues = selectedRuns.map(r => {
+    let raw = r.metrics[activeMetricKey] as number | undefined;
+    if (activeMetricKey === 'channelUtilization' && raw !== undefined) {
+      raw = raw * 100;
+    }
+    return raw ?? 0;
+  });
+  const maxChartValue = Math.max(1, ...metricValues);
+  const chartTrackWidth = 480;
+
   return (
-    <div>
+    <div className="comparisons-workspace">
       <header className="page-header">
         <div>
-          <h1>Protocol comparisons</h1>
-          <p>Select saved experiments to compare measured results and their shared conditions.</p>
+          <h1>Protocol Comparison</h1>
+          <p>
+            Evaluate protocol efficiency, collision rates, and delay characteristics across saved experimental runs.
+          </p>
         </div>
-        <Link className="btn" to="/simulations/new">Create experiment</Link>
+        <Link className="btn primary" to="/simulations/new">
+          New Simulation
+        </Link>
       </header>
 
       {error ? (
         <div className="error-message" role="alert">{error}</div>
       ) : runs.length === 0 ? (
         <div className="empty-state">
-          <h2>No experiments to compare</h2>
-          <p>Save completed simulations first. Results are not fabricated or generated for this view.</p>
-          <Link className="btn primary" to="/simulations/new">Configure a simulation</Link>
+          <h2>No Saved Experiments to Compare</h2>
+          <p>
+            Complete and save at least two simulations to perform comparative analysis. Real experiment records are never fabricated.
+          </p>
+          <Link className="btn primary" to="/simulations/new">
+            Configure a Simulation
+          </Link>
         </div>
       ) : (
         <>
-          <section className="panel" aria-labelledby="select-runs-heading">
-            <h2 id="select-runs-heading">Experiments</h2>
-            <p className="help-text">Choose at least two completed runs. Only common conditions are used to assess comparability.</p>
+          {/* Saved Experiments Selection Table */}
+          <section className="panel" aria-labelledby="select-runs-heading" style={{ marginBottom: 20 }}>
+            <div className="table-toolbar">
+              <div>
+                <h2 id="select-runs-heading" style={{ fontSize: 16, margin: 0 }}>
+                  Select Experiments to Compare
+                </h2>
+                <span className="muted" style={{ fontSize: 12 }}>
+                  Check two or more runs to plot side-by-side performance metrics.
+                </span>
+              </div>
+              <span className="mono" style={{ fontSize: 12, color: '#DDB487' }}>
+                {selectedRuns.length} selected
+              </span>
+            </div>
+
             <div className="table-wrap">
               <table>
                 <thead>
                   <tr>
-                    <th scope="col">Select</th>
+                    <th scope="col" style={{ width: 44 }}>Select</th>
                     <th scope="col">Protocol</th>
                     <th scope="col">Stations</th>
-                    <th scope="col">Frame size</th>
-                    <th scope="col">Data rate</th>
+                    <th scope="col">Frame Size</th>
+                    <th scope="col">Data Rate</th>
                     <th scope="col">Duration</th>
-                    <th scope="col">Seed</th>
+                    <th scope="col">Intensity</th>
+                    <th scope="col">Throughput</th>
+                    <th scope="col">Collisions</th>
+                    <th scope="col">Run ID</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {runs.map(run => (
-                    <tr key={run.id}>
-                      <td>
-                        <input
-                          type="checkbox"
-                          aria-label={`Select ${formatProtocol(run.config.protocol)} run ${run.id}`}
-                          checked={selectedIds.includes(run.id)}
-                          onChange={() => toggleRun(run.id)}
-                        />
-                      </td>
-                      <td><Link to={`/simulations/${run.id}`}>{formatProtocol(run.config.protocol)}</Link></td>
-                      <td className="numeric-cell">{run.config.stationCount}</td>
-                      <td className="numeric-cell">{run.config.frameSizeBytes} bytes</td>
-                      <td className="numeric-cell">{run.config.dataRateBps.toLocaleString()} bps</td>
-                      <td className="numeric-cell">{run.config.durationMs.toLocaleString()} ms</td>
-                      <td className="numeric-cell">{run.config.randomSeed ?? 'Not recorded'}</td>
-                    </tr>
-                  ))}
+                  {runs.map(run => {
+                    const isChecked = selectedIds.includes(run.id);
+                    return (
+                      <tr key={run.id} style={{ background: isChecked ? '#252626' : undefined }}>
+                        <td>
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={() => toggleRun(run.id)}
+                            aria-label={`Select ${formatProtocol(run.config.protocol)} run ${run.id}`}
+                          />
+                        </td>
+                        <td>
+                          <strong style={{ color: protocolColors[run.config.protocol] }}>
+                            {formatProtocol(run.config.protocol)}
+                          </strong>
+                        </td>
+                        <td className="numeric-cell">{run.config.stationCount}</td>
+                        <td className="numeric-cell">{run.config.frameSizeBytes} B</td>
+                        <td className="numeric-cell">
+                          {(run.config.dataRateBps / 1000).toLocaleString()} kbps
+                        </td>
+                        <td className="numeric-cell">{run.config.durationMs} ms</td>
+                        <td className="numeric-cell">{run.config.trafficIntensity}</td>
+                        <td className="numeric-cell mono">
+                          {formatNumber(run.metrics.throughputBps, 1)} bps
+                        </td>
+                        <td className="numeric-cell">{formatNumber(run.metrics.collisions)}</td>
+                        <td className="mono" style={{ fontSize: 11 }}>
+                          <Link to={`/simulations/${run.id}`}>{run.id.slice(0, 8)}</Link>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
           </section>
 
-          <section className="section" aria-labelledby="results-heading">
-            <h2 className="section-heading" id="results-heading">Results</h2>
-            {selectedRuns.length < 2 ? (
-              <div className="empty-state">Select at least two runs to see a comparison.</div>
-            ) : (
-              <>
-                <div className={comparable ? 'comparison-note' : 'error-message'} role={comparable ? 'status' : 'alert'}>
-                  {comparable
-                    ? 'Selected runs use the same station count, frame size, data rate, duration, traffic model, intensity, and random seed.'
-                    : 'Selected runs use different conditions. Values are shown for inspection but are not a fair protocol comparison.'}
+          {/* Comparability Notice */}
+          {selectedRuns.length >= 2 && (
+            <div
+              className={isFair ? 'comparison-fair-note' : 'comparison-caution-note'}
+              role={isFair ? 'status' : 'alert'}
+              style={{ marginBottom: 20 }}
+            >
+              {isFair ? (
+                <>
+                  <strong style={{ color: '#78B978' }}>Controlled Experiment:</strong> All {selectedRuns.length} selected runs share identical station count, frame size, data rate, duration, traffic model, intensity, and random seed.
+                </>
+              ) : (
+                <>
+                  <strong style={{ color: '#D5A45D' }}>Varying Parameters Detected:</strong> Experiments differ in: {differences.join(', ')}. Differences in measured output cannot be attributed solely to protocol rules.
+                </>
+              )}
+            </div>
+          )}
+
+          {selectedRuns.length < 2 ? (
+            <div className="empty-state">
+              <h3>Select At Least Two Experiments</h3>
+              <p>Choose two or more simulation runs in the table above to view comparative charts and insights.</p>
+            </div>
+          ) : (
+            <>
+              {/* Metric Selector Tabs */}
+              <div className="metric-selector-bar" role="tablist" aria-label="Select comparison metric">
+                {metricsList.map(m => (
+                  <button
+                    key={m.key}
+                    type="button"
+                    role="tab"
+                    aria-selected={activeMetricKey === m.key}
+                    className={`metric-tab${activeMetricKey === m.key ? ' active' : ''}`}
+                    onClick={() => setActiveMetricKey(m.key)}
+                  >
+                    {m.label} ({m.unit})
+                  </button>
+                ))}
+              </div>
+
+              {/* Main SVG Comparison Chart */}
+              <section className="panel chart-panel" aria-labelledby="chart-heading" style={{ marginBottom: 20 }}>
+                <div className="chart-header">
+                  <div>
+                    <h2 id="chart-heading" style={{ fontSize: 16, margin: 0 }}>
+                      {activeMetricMeta.label} by Protocol
+                    </h2>
+                    <span className="muted" style={{ fontSize: 12 }}>
+                      Measured values in {activeMetricMeta.unit} across selected simulation runs
+                    </span>
+                  </div>
+
+                  {/* Legend */}
+                  <div className="chart-legend" aria-hidden="true">
+                    {selectedRuns.map(r => (
+                      <span className="legend-item" key={r.id}>
+                        <span
+                          className="legend-color"
+                          style={{ background: protocolColors[r.config.protocol] }}
+                        />
+                        {formatProtocol(r.config.protocol)} ({r.id.slice(0, 6)})
+                      </span>
+                    ))}
+                  </div>
                 </div>
-                <figure
-                  className="throughput-chart"
-                  aria-label={`Throughput comparison: ${selectedRuns.map(run =>
-                    `${formatProtocol(run.config.protocol)} ${formatNumber(run.metrics.throughputBps, 1)} bits per second`,
-                  ).join('; ')}`}
-                >
-                  <figcaption>Throughput by protocol (bps)</figcaption>
-                  <ol className="throughput-chart-list" aria-hidden="true">
-                    {selectedRuns.map(run => {
-                      const throughput = run.metrics.throughputBps ?? 0;
-                      const width = maxThroughput > 0 ? (throughput / maxThroughput) * 100 : 0;
+
+                {/* SVG Technical Bar Chart */}
+                <div className="svg-chart-container" tabIndex={0} aria-label={`${activeMetricMeta.label} comparison chart`}>
+                  <svg
+                    viewBox={`0 0 820 ${80 + selectedRuns.length * 36}`}
+                    width="100%"
+                    height={80 + selectedRuns.length * 36}
+                    style={{ display: 'block', background: '#191A1A' }}
+                    aria-hidden="true"
+                  >
+                    {/* Ticks & Gridlines */}
+                    {[0, 0.25, 0.5, 0.75, 1].map(ratio => {
+                      const x = 160 + ratio * chartTrackWidth;
+                      const tickVal = maxChartValue * ratio;
                       return (
-                        <li className="throughput-chart-row" key={run.id}>
-                          <span>{formatProtocol(run.config.protocol)}</span>
-                          <span className="throughput-bar-axis">
-                            <span className="throughput-bar" style={{ width: `${width}%` }} />
-                          </span>
-                          <span className="throughput-chart-value">{formatNumber(run.metrics.throughputBps, 1)}</span>
-                        </li>
+                        <g key={ratio}>
+                          <line x1={x} y1="25" x2={x} y2={45 + selectedRuns.length * 36} stroke="#252626" strokeWidth="1" />
+                          <text x={x} y="18" fill="#928A7F" fontSize="9" fontFamily="IBM Plex Mono" textAnchor="middle">
+                            {formatNumber(tickVal, activeMetricMeta.fractionDigits)}
+                          </text>
+                        </g>
                       );
                     })}
-                  </ol>
-                </figure>
-                <div className="table-wrap comparison-table">
+
+                    {/* Bars */}
+                    {selectedRuns.map((run, idx) => {
+                      let raw = run.metrics[activeMetricKey] as number | undefined;
+                      if (activeMetricKey === 'channelUtilization' && raw !== undefined) {
+                        raw = raw * 100;
+                      }
+                      const val = raw ?? 0;
+                      const width = maxChartValue > 0 ? (val / maxChartValue) * chartTrackWidth : 0;
+                      const y = 32 + idx * 36;
+                      const color = protocolColors[run.config.protocol];
+
+                      return (
+                        <g key={run.id}>
+                          {/* Protocol Label */}
+                          <text
+                            x="150"
+                            y={y + 16}
+                            fill="#F3EDE4"
+                            fontSize="11"
+                            fontFamily="IBM Plex Mono"
+                            textAnchor="end"
+                          >
+                            {formatProtocol(run.config.protocol)}
+                          </text>
+
+                          {/* Track */}
+                          <line x1="160" y1={y + 11} x2={160 + chartTrackWidth} y2={y + 11} stroke="#403C36" strokeWidth="1" />
+
+                          {/* Data Bar */}
+                          <rect
+                            x="160"
+                            y={y + 2}
+                            width={Math.max(2, width)}
+                            height="18"
+                            fill={color}
+                            stroke="#141515"
+                            strokeWidth="0.5"
+                          />
+
+                          {/* Value Label */}
+                          <text
+                            x={168 + Math.max(2, width)}
+                            y={y + 15}
+                            fill="#F3EDE4"
+                            fontSize="10"
+                            fontFamily="IBM Plex Mono"
+                          >
+                            {formatNumber(val, activeMetricMeta.fractionDigits)} {activeMetricMeta.unit}
+                          </text>
+                        </g>
+                      );
+                    })}
+                  </svg>
+                </div>
+              </section>
+
+              {/* Key Insight Panel */}
+              <section className="panel key-insight-panel" aria-labelledby="insight-heading" style={{ marginBottom: 20 }}>
+                <div className="insight-header">
+                  <h2 id="insight-heading" style={{ fontSize: 15, margin: 0, color: '#DDB487' }}>
+                    Key Simulation Insight
+                  </h2>
+                  <span className="mono" style={{ fontSize: 11, color: '#928A7F' }}>
+                    DATA-DRIVEN FACTUAL DEDUCTION
+                  </span>
+                </div>
+                <p className="insight-text">{keyInsight}</p>
+              </section>
+
+              {/* Results Summary Table */}
+              <section className="panel" aria-labelledby="results-summary-heading">
+                <h2 id="results-summary-heading" style={{ fontSize: 16, marginBottom: 12 }}>
+                  Comparative Experiment Metrics
+                </h2>
+
+                <div className="table-wrap">
                   <table>
                     <thead>
                       <tr>
-                        <th scope="col">Measured metric</th>
-                        {selectedRuns.map(run => <th scope="col" key={run.id}>{formatProtocol(run.config.protocol)}</th>)}
+                        <th scope="col">Parameter / Metric</th>
+                        {selectedRuns.map(run => (
+                          <th scope="col" key={run.id} style={{ color: protocolColors[run.config.protocol] }}>
+                            {formatProtocol(run.config.protocol)}
+                            <br />
+                            <span className="mono" style={{ fontSize: 10, color: '#928A7F' }}>
+                              ({run.id.slice(0, 6)})
+                            </span>
+                          </th>
+                        ))}
                       </tr>
                     </thead>
                     <tbody>
                       <tr>
-                        <th scope="row">Successful frames</th>
-                        {selectedRuns.map(run => <td className="numeric-cell" key={run.id}>{formatNumber(run.metrics.successfulFrames)}</td>)}
-                      </tr>
-                      <tr>
-                        <th scope="row">Collision incidents</th>
-                        {selectedRuns.map(run => <td className="numeric-cell" key={run.id}>{formatNumber(run.metrics.collisions)}</td>)}
-                      </tr>
-                      <tr>
-                        <th scope="row">Retransmissions</th>
-                        {selectedRuns.map(run => <td className="numeric-cell" key={run.id}>{formatNumber(run.metrics.retransmissions)}</td>)}
-                      </tr>
-                      <tr>
-                        <th scope="row">Throughput (bps)</th>
-                        {selectedRuns.map(run => <td className="numeric-cell" key={run.id}>{formatNumber(run.metrics.throughputBps, 1)}</td>)}
-                      </tr>
-                      <tr>
-                        <th scope="row">Goodput (bps)</th>
-                        {selectedRuns.map(run => <td className="numeric-cell" key={run.id}>{formatNumber(run.metrics.goodputBps, 1)}</td>)}
-                      </tr>
-                      <tr>
-                        <th scope="row">Channel utilization</th>
-                        {selectedRuns.map(run => (
-                          <td className="numeric-cell" key={run.id}>
-                            {run.metrics.channelUtilization === undefined
-                              ? 'Not available'
-                              : `${formatNumber(run.metrics.channelUtilization * 100, 1)}%`}
-                          </td>
+                        <th scope="row">Station Count</th>
+                        {selectedRuns.map(r => (
+                          <td className="numeric-cell" key={r.id}>{r.config.stationCount}</td>
                         ))}
                       </tr>
                       <tr>
-                        <th scope="row">Average delay (ms)</th>
-                        {selectedRuns.map(run => <td className="numeric-cell" key={run.id}>{formatNumber(run.metrics.averageDelayMs, 2)}</td>)}
+                        <th scope="row">Frame Size</th>
+                        {selectedRuns.map(r => (
+                          <td className="numeric-cell" key={r.id}>{r.config.frameSizeBytes} bytes</td>
+                        ))}
+                      </tr>
+                      <tr>
+                        <th scope="row">Data Rate</th>
+                        {selectedRuns.map(r => (
+                          <td className="numeric-cell" key={r.id}>{(r.config.dataRateBps / 1000).toLocaleString()} kbps</td>
+                        ))}
+                      </tr>
+                      <tr>
+                        <th scope="row">Duration</th>
+                        {selectedRuns.map(r => (
+                          <td className="numeric-cell" key={r.id}>{r.config.durationMs} ms</td>
+                        ))}
+                      </tr>
+                      <tr>
+                        <th scope="row">Traffic Intensity G</th>
+                        {selectedRuns.map(r => (
+                          <td className="numeric-cell" key={r.id}>{r.config.trafficIntensity}</td>
+                        ))}
+                      </tr>
+                      <tr>
+                        <th scope="row">Random Seed</th>
+                        {selectedRuns.map(r => (
+                          <td className="numeric-cell mono" key={r.id}>{r.config.randomSeed ?? 'Not recorded'}</td>
+                        ))}
+                      </tr>
+                      <tr style={{ background: '#252626' }}>
+                        <th scope="row">Delivered Frames</th>
+                        {selectedRuns.map(r => (
+                          <td className="numeric-cell mono" key={r.id} style={{ color: '#78B978' }}>
+                            {formatNumber(r.metrics.successfulFrames)}
+                          </td>
+                        ))}
+                      </tr>
+                      <tr style={{ background: '#252626' }}>
+                        <th scope="row">Collision Incidents</th>
+                        {selectedRuns.map(r => (
+                          <td className="numeric-cell mono" key={r.id} style={{ color: '#D96A62' }}>
+                            {formatNumber(r.metrics.collisions)}
+                          </td>
+                        ))}
+                      </tr>
+                      <tr style={{ background: '#252626' }}>
+                        <th scope="row">Retransmissions</th>
+                        {selectedRuns.map(r => (
+                          <td className="numeric-cell mono" key={r.id} style={{ color: '#D5A45D' }}>
+                            {formatNumber(r.metrics.retransmissions)}
+                          </td>
+                        ))}
+                      </tr>
+                      <tr style={{ background: '#252626' }}>
+                        <th scope="row">Throughput (bps)</th>
+                        {selectedRuns.map(r => (
+                          <td className="numeric-cell mono" key={r.id} style={{ color: '#DDB487', fontWeight: 600 }}>
+                            {formatNumber(r.metrics.throughputBps, 1)}
+                          </td>
+                        ))}
+                      </tr>
+                      <tr style={{ background: '#252626' }}>
+                        <th scope="row">Channel Utilization (%)</th>
+                        {selectedRuns.map(r => (
+                          <td className="numeric-cell mono" key={r.id}>
+                            {r.metrics.channelUtilization !== undefined
+                              ? `${formatNumber(r.metrics.channelUtilization * 100, 1)}%`
+                              : 'Not available'}
+                          </td>
+                        ))}
+                      </tr>
+                      <tr style={{ background: '#252626' }}>
+                        <th scope="row">Average Delay (ms)</th>
+                        {selectedRuns.map(r => (
+                          <td className="numeric-cell mono" key={r.id}>
+                            {formatNumber(r.metrics.averageDelayMs, 2)}
+                          </td>
+                        ))}
                       </tr>
                     </tbody>
                   </table>
                 </div>
-                <p className="help-text">Throughput and goodput are measured over elapsed simulation time. Average delay is unavailable when no frame was delivered.</p>
-              </>
-            )}
-          </section>
+              </section>
+            </>
+          )}
         </>
       )}
     </div>

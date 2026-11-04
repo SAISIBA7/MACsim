@@ -1,246 +1,655 @@
 import { useState, type FormEvent } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import type { Protocol, SimulationConfig, TrafficModel } from '../types';
-import { formatProtocol } from '../utils/format';
+import { formatNumber, formatProtocol } from '../utils/format';
+import { ProtocolDiagram } from '../components/ProtocolDiagram';
+import { ArrowLeftIcon, ArrowRightIcon, CheckIcon } from '../components/Icons';
+import { getSimulationDefaults } from '../store/runs';
 
-const protocols: Protocol[] = ['PURE_ALOHA', 'SLOTTED_ALOHA', 'CSMA', 'CSMA_CD'];
+const protocols: { id: Protocol; name: string; description: string }[] = [
+  {
+    id: 'PURE_ALOHA',
+    name: 'Pure ALOHA',
+    description: 'Stations transmit frames immediately without sensing. Collision vulnerability period equals 2 frame times.',
+  },
+  {
+    id: 'SLOTTED_ALOHA',
+    name: 'Slotted ALOHA',
+    description: 'Transmissions are restricted to predefined discrete time slots. Collision vulnerability period is reduced to 1 frame time.',
+  },
+  {
+    id: 'CSMA',
+    name: 'CSMA',
+    description: 'Carrier Sense Multiple Access senses the medium before transmitting. Defers if another station is transmitting.',
+  },
+  {
+    id: 'CSMA_CD',
+    name: 'CSMA/CD',
+    description: 'Carrier Sense with Collision Detection aborts transmissions immediately upon detecting an active collision.',
+  },
+];
+
+type WizardStep = 1 | 2 | 3 | 4;
 
 export default function NewSim() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const requestedProtocol = searchParams.get('protocol');
+  const defaults = getSimulationDefaults();
+
+  const [step, setStep] = useState<WizardStep>(1);
+
+  // Step 1: Protocol
   const [protocol, setProtocol] = useState<Protocol>(
-    protocols.find(value => value === requestedProtocol) ?? 'PURE_ALOHA',
+    protocols.some(p => p.id === requestedProtocol) ? (requestedProtocol as Protocol) : 'PURE_ALOHA',
   );
-  const [stationCount, setStationCount] = useState('4');
-  const [frameSizeBytes, setFrameSizeBytes] = useState('1024');
-  const [dataRateBps, setDataRateBps] = useState('1000000');
-  const [durationMs, setDurationMs] = useState('1000');
-  const [trafficModel, setTrafficModel] = useState<TrafficModel>('poisson');
-  const [trafficIntensity, setTrafficIntensity] = useState('0.5');
+
+  // Step 2: Network
+  const [stationCount, setStationCount] = useState(String(defaults.stationCount));
+  const [frameSizeBytes, setFrameSizeBytes] = useState(String(defaults.frameSizeBytes));
+  const [dataRateBps, setDataRateBps] = useState(String(defaults.dataRateBps));
+  const [durationMs, setDurationMs] = useState(String(defaults.durationMs));
+
+  // Step 3: Traffic
+  const [trafficModel, setTrafficModel] = useState<TrafficModel>(defaults.trafficModel);
+  const [trafficIntensity, setTrafficIntensity] = useState(String(defaults.trafficIntensity));
+
+  // Step 4: Advanced
   const [randomSeed, setRandomSeed] = useState('42');
   const [slotDurationMs, setSlotDurationMs] = useState('8.192');
   const [propagationDelayMs, setPropagationDelayMs] = useState('0.25');
   const [maxRetries, setMaxRetries] = useState('12');
   const [maxBackoffSlots, setMaxBackoffSlots] = useState('16');
+
+  // Errors & submission
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [submitError, setSubmitError] = useState('');
 
-  const validate = (): { config?: SimulationConfig; errors: Record<string, string> } => {
+  // Validation per step
+  const validateStep = (targetStep: WizardStep): boolean => {
     const nextErrors: Record<string, string> = {};
-    const stationValue = Number(stationCount);
-    const frameValue = Number(frameSizeBytes);
-    const rateValue = Number(dataRateBps);
-    const durationValue = Number(durationMs);
-    const intensityValue = Number(trafficIntensity);
-    const slotValue = Number(slotDurationMs);
-    const propagationValue = Number(propagationDelayMs);
-    const retryValue = Number(maxRetries);
-    const backoffValue = Number(maxBackoffSlots);
-    const seedValue = randomSeed.trim() === '' ? undefined : Number(randomSeed);
 
-    if (!Number.isInteger(stationValue) || stationValue < 2 || stationValue > 64) {
-      nextErrors.stationCount = 'Enter a whole number from 2 to 64.';
-    }
-    if (!Number.isInteger(frameValue) || frameValue < 64 || frameValue > 65535) {
-      nextErrors.frameSizeBytes = 'Enter a whole number from 64 to 65,535 bytes.';
-    }
-    if (!Number.isInteger(rateValue) || rateValue < 1000 || rateValue > 1_000_000_000) {
-      nextErrors.dataRateBps = 'Enter a rate from 1,000 to 1,000,000,000 bits per second.';
-    }
-    if (!Number.isFinite(durationValue) || durationValue < 1 || durationValue > 120_000) {
-      nextErrors.durationMs = 'Enter a duration from 1 to 120,000 milliseconds.';
-    }
-    if (!Number.isFinite(intensityValue) || intensityValue <= 0 || intensityValue > 5) {
-      nextErrors.trafficIntensity = 'Enter an intensity greater than 0 and no more than 5.';
-    }
-    if (randomSeed.trim() !== '' && (!Number.isInteger(seedValue) || (seedValue ?? -1) < 0 || (seedValue ?? 0) > 2_147_483_647)) {
-      nextErrors.randomSeed = 'Enter a whole number from 0 to 2,147,483,647, or leave it blank.';
-    }
-    if ((protocol === 'SLOTTED_ALOHA' || protocol === 'CSMA_CD') && (!Number.isFinite(slotValue) || slotValue <= 0)) {
-      nextErrors.slotDurationMs = 'Enter a slot duration greater than 0 milliseconds.';
-    }
-    if (protocol === 'CSMA_CD' && (!Number.isFinite(propagationValue) || propagationValue < 0)) {
-      nextErrors.propagationDelayMs = 'Enter a propagation delay of 0 milliseconds or more.';
-    }
-    if (protocol === 'CSMA_CD' && (!Number.isInteger(retryValue) || retryValue < 1 || retryValue > 32)) {
-      nextErrors.maxRetries = 'Enter a whole number from 1 to 32.';
-    }
-    if (protocol === 'CSMA_CD' && (!Number.isInteger(backoffValue) || backoffValue < 1 || backoffValue > 1024)) {
-      nextErrors.maxBackoffSlots = 'Enter a whole number from 1 to 1,024.';
-    }
-    if (Object.keys(nextErrors).length === 0) {
-      const frameTimeMs = (frameValue * 8 * 1000) / rateValue;
-      const expectedFrames = (stationValue * intensityValue * durationValue) / frameTimeMs;
-      if (expectedFrames > 50_000) {
-        nextErrors.workload = 'These settings may generate more than 50,000 frames. Reduce duration or traffic intensity, or increase frame size.';
+    if (targetStep === 1) {
+      if (!protocols.some(p => p.id === protocol)) {
+        nextErrors.protocol = 'Please select a valid MAC protocol.';
+      }
+    } else if (targetStep === 2) {
+      const stationVal = Number(stationCount);
+      const frameVal = Number(frameSizeBytes);
+      const rateVal = Number(dataRateBps);
+      const durationVal = Number(durationMs);
+
+      if (!Number.isInteger(stationVal) || stationVal < 2 || stationVal > 64) {
+        nextErrors.stationCount = 'Enter a whole number of stations from 2 to 64.';
+      }
+      if (!Number.isInteger(frameVal) || frameVal < 64 || frameVal > 65535) {
+        nextErrors.frameSizeBytes = 'Enter a frame size from 64 to 65,535 bytes.';
+      }
+      if (!Number.isInteger(rateVal) || rateVal < 1000 || rateVal > 1_000_000_000) {
+        nextErrors.dataRateBps = 'Enter a transmission rate from 1,000 to 1,000,000,000 bits per second.';
+      }
+      if (!Number.isFinite(durationVal) || durationVal < 1 || durationVal > 120_000) {
+        nextErrors.durationMs = 'Enter an experiment duration from 1 to 120,000 milliseconds.';
+      }
+    } else if (targetStep === 3) {
+      const intensityVal = Number(trafficIntensity);
+      if (!Number.isFinite(intensityVal) || intensityVal <= 0 || intensityVal > 5) {
+        nextErrors.trafficIntensity = 'Traffic intensity must be greater than 0 and no more than 5.0.';
+      }
+
+      // Check expected total frame volume
+      const frameVal = Number(frameSizeBytes);
+      const rateVal = Number(dataRateBps);
+      const stationVal = Number(stationCount);
+      const durationVal = Number(durationMs);
+      if (frameVal > 0 && rateVal > 0 && stationVal > 0 && durationVal > 0) {
+        const frameTimeMs = (frameVal * 8 * 1000) / rateVal;
+        const expectedFrames = (stationVal * intensityVal * durationVal) / frameTimeMs;
+        if (expectedFrames > 50_000) {
+          nextErrors.workload =
+            'Estimated workload exceeds 50,000 frames. Reduce duration, reduce traffic intensity, or increase frame size.';
+        }
+      }
+    } else if (targetStep === 4) {
+      const seedVal = randomSeed.trim() === '' ? undefined : Number(randomSeed);
+      const slotVal = Number(slotDurationMs);
+      const propVal = Number(propagationDelayMs);
+      const retryVal = Number(maxRetries);
+      const backoffVal = Number(maxBackoffSlots);
+
+      if (
+        randomSeed.trim() !== '' &&
+        (!Number.isInteger(seedVal) || (seedVal ?? -1) < 0 || (seedVal ?? 0) > 2_147_483_647)
+      ) {
+        nextErrors.randomSeed = 'Random seed must be an integer between 0 and 2,147,483,647.';
+      }
+      if (protocol === 'SLOTTED_ALOHA' || protocol === 'CSMA_CD') {
+        if (!Number.isFinite(slotVal) || slotVal <= 0) {
+          nextErrors.slotDurationMs = 'Slot duration must be a positive number greater than 0 ms.';
+        }
+      }
+      if (protocol === 'CSMA_CD') {
+        if (!Number.isFinite(propVal) || propVal < 0) {
+          nextErrors.propagationDelayMs = 'Propagation delay must be 0 ms or greater.';
+        }
+        if (!Number.isInteger(retryVal) || retryVal < 1 || retryVal > 32) {
+          nextErrors.maxRetries = 'Maximum retries must be a whole number from 1 to 32.';
+        }
+        if (!Number.isInteger(backoffVal) || backoffVal < 1 || backoffVal > 1024) {
+          nextErrors.maxBackoffSlots = 'Maximum backoff slots must be a whole number from 1 to 1,024.';
+        }
       }
     }
 
-    if (Object.keys(nextErrors).length > 0) return { errors: nextErrors };
-
-    return {
-      errors: {},
-      config: {
-        protocol,
-        stationCount: stationValue,
-        frameSizeBytes: frameValue,
-        dataRateBps: rateValue,
-        durationMs: durationValue,
-        trafficModel,
-        trafficIntensity: intensityValue,
-        randomSeed: seedValue,
-        slotDurationMs: protocol === 'SLOTTED_ALOHA' || protocol === 'CSMA_CD' ? slotValue : undefined,
-        propagationDelayMs: protocol === 'CSMA_CD' ? propagationValue : undefined,
-        maxRetries: protocol === 'CSMA_CD' ? retryValue : undefined,
-        maxBackoffSlots: protocol === 'CSMA_CD' ? backoffValue : undefined,
-      },
-    };
+    setErrors(nextErrors);
+    return Object.keys(nextErrors).length === 0;
   };
 
-  const submit = (event: FormEvent<HTMLFormElement>) => {
+  const nextStep = () => {
+    if (validateStep(step)) {
+      setStep(curr => Math.min(4, curr + 1) as WizardStep);
+    }
+  };
+
+  const prevStep = () => {
+    setErrors({});
+    setStep(curr => Math.max(1, curr - 1) as WizardStep);
+  };
+
+  const jumpToStep = (target: WizardStep) => {
+    if (target < step) {
+      setErrors({});
+      setStep(target);
+    } else {
+      let canAdvance = true;
+      for (let s = step; s < target; s++) {
+        if (!validateStep(s as WizardStep)) {
+          canAdvance = false;
+          break;
+        }
+      }
+      if (canAdvance) {
+        setStep(target);
+      }
+    }
+  };
+
+  const handleStartSimulation = (event: FormEvent) => {
     event.preventDefault();
     setSubmitError('');
-    const result = validate();
-    setErrors(result.errors);
-    if (!result.config) return;
+
+    for (let s = 1; s <= 4; s++) {
+      if (!validateStep(s as WizardStep)) {
+        setStep(s as WizardStep);
+        return;
+      }
+    }
 
     try {
+      const config: SimulationConfig = {
+        protocol,
+        stationCount: Number(stationCount),
+        frameSizeBytes: Number(frameSizeBytes),
+        dataRateBps: Number(dataRateBps),
+        durationMs: Number(durationMs),
+        trafficModel,
+        trafficIntensity: Number(trafficIntensity),
+        randomSeed: randomSeed.trim() === '' ? undefined : Number(randomSeed),
+        slotDurationMs:
+          protocol === 'SLOTTED_ALOHA' || protocol === 'CSMA_CD' ? Number(slotDurationMs) : undefined,
+        propagationDelayMs: protocol === 'CSMA_CD' ? Number(propagationDelayMs) : undefined,
+        maxRetries: protocol === 'CSMA_CD' ? Number(maxRetries) : undefined,
+        maxBackoffSlots: protocol === 'CSMA_CD' ? Number(maxBackoffSlots) : undefined,
+      };
+
       const id = crypto.randomUUID();
-      sessionStorage.setItem(`macsim_pending_${id}`, JSON.stringify(result.config));
+      sessionStorage.setItem(`macsim_pending_${id}`, JSON.stringify(config));
       navigate(`/simulations/${id}`);
     } catch (reason) {
       setSubmitError(reason instanceof Error ? reason.message : 'The simulation could not be initialized.');
     }
   };
 
-  const fieldError = (key: string) => errors[key] ? <small id={`${key}-error`} className="error-text">{errors[key]}</small> : null;
-  const describedBy = (key: string) => errors[key] ? `${key}-error` : undefined;
-  const configPreview = validate().config;
+  const frameTimeMs =
+    Number(dataRateBps) > 0 ? (Number(frameSizeBytes) * 8 * 1000) / Number(dataRateBps) : 0;
+  const estimatedFrames =
+    frameTimeMs > 0
+      ? Math.round((Number(stationCount) * Number(trafficIntensity) * Number(durationMs)) / frameTimeMs)
+      : 0;
+
+  const fieldError = (key: string) =>
+    errors[key] ? (
+      <small id={`${key}-error`} className="error-text">
+        {errors[key]}
+      </small>
+    ) : null;
 
   return (
-    <div>
+    <div className="new-sim-workspace">
       <header className="page-header">
         <div>
-          <h1>New simulation</h1>
-          <p>Set the shared experiment conditions. A random seed makes the traffic sequence repeatable.</p>
+          <h1>Configure Your Simulation</h1>
+          <p>
+            Define repeatable channel parameters, station topology, and traffic intensity across four configuration stages.
+          </p>
         </div>
       </header>
 
-      <div className="form-layout">
-        <form className="panel form-stack" onSubmit={submit} noValidate>
-          {submitError && <div className="error-message" role="alert">{submitError}</div>}
-          {errors.workload && <div className="error-message" role="alert">{errors.workload}</div>}
-          <div className="field">
-            <label htmlFor="protocol">Protocol</label>
-            <select id="protocol" value={protocol} onChange={event => setProtocol(event.target.value as Protocol)}>
-              {protocols.map(value => <option value={value} key={value}>{formatProtocol(value)}</option>)}
-            </select>
-            <small>Select the channel access rules to simulate.</small>
-          </div>
+      {/* 4-Step Horizontal Progress Indicator */}
+      <div className="stepper" role="navigation" aria-label="Configuration steps">
+        <button
+          type="button"
+          className={`step-item${step === 1 ? ' active' : ''}${step > 1 ? ' completed' : ''}`}
+          onClick={() => jumpToStep(1)}
+        >
+          <span className="step-number">{step > 1 ? <CheckIcon /> : '1'}</span>
+          <span className="step-label">1. Protocol</span>
+        </button>
 
-          <div className="field-grid">
-            <div className="field">
-              <label htmlFor="station-count">Number of stations</label>
-              <input id="station-count" type="number" min="2" max="64" step="1" value={stationCount} aria-invalid={Boolean(errors.stationCount)} aria-describedby={describedBy('stationCount')} onChange={event => setStationCount(event.target.value)} />
-              {fieldError('stationCount')}
-            </div>
-            <div className="field">
-              <label htmlFor="frame-size">Frame size (bytes)</label>
-              <input id="frame-size" type="number" min="64" max="65535" step="1" value={frameSizeBytes} aria-invalid={Boolean(errors.frameSizeBytes)} aria-describedby={describedBy('frameSizeBytes')} onChange={event => setFrameSizeBytes(event.target.value)} />
-              {fieldError('frameSizeBytes')}
-            </div>
-            <div className="field">
-              <label htmlFor="data-rate">Data rate (bits per second)</label>
-              <input id="data-rate" type="number" min="1000" max="1000000000" step="1000" value={dataRateBps} aria-invalid={Boolean(errors.dataRateBps)} aria-describedby={describedBy('dataRateBps')} onChange={event => setDataRateBps(event.target.value)} />
-              {fieldError('dataRateBps')}
-            </div>
-            <div className="field">
-              <label htmlFor="duration">Simulation duration (ms)</label>
-              <input id="duration" type="number" min="1" max="120000" step="100" value={durationMs} aria-invalid={Boolean(errors.durationMs)} aria-describedby={describedBy('durationMs')} onChange={event => setDurationMs(event.target.value)} />
-              {fieldError('durationMs')}
-            </div>
-            <div className="field">
-              <label htmlFor="traffic-model">Traffic generation model</label>
-              <select id="traffic-model" value={trafficModel} onChange={event => setTrafficModel(event.target.value as TrafficModel)}>
-                <option value="poisson">Poisson arrivals</option>
-                <option value="uniform">Uniform intervals</option>
-              </select>
-              <small>Poisson uses random inter-arrival times. Uniform uses a fixed interval per station.</small>
-            </div>
-            <div className="field">
-              <label htmlFor="traffic-intensity">Traffic intensity (frames / frame time / station)</label>
-              <input id="traffic-intensity" type="number" min="0.01" max="5" step="0.05" value={trafficIntensity} aria-invalid={Boolean(errors.trafficIntensity)} aria-describedby={describedBy('trafficIntensity')} onChange={event => setTrafficIntensity(event.target.value)} />
-              {fieldError('trafficIntensity')}
-            </div>
-            <div className="field">
-              <label htmlFor="random-seed">Random seed (optional)</label>
-              <input id="random-seed" type="number" min="0" max="2147483647" step="1" value={randomSeed} aria-invalid={Boolean(errors.randomSeed)} aria-describedby={describedBy('randomSeed')} onChange={event => setRandomSeed(event.target.value)} />
-              {fieldError('randomSeed')}
-            </div>
-          </div>
+        <div className="step-connector" />
 
-          {protocol === 'SLOTTED_ALOHA' && (
-            <div className="field">
-              <label htmlFor="slot-duration">Slot duration (ms)</label>
-              <input id="slot-duration" type="number" min="0.001" step="0.001" value={slotDurationMs} aria-invalid={Boolean(errors.slotDurationMs)} aria-describedby={describedBy('slotDurationMs')} onChange={event => setSlotDurationMs(event.target.value)} />
-              <small>Frames can begin only at multiples of this slot duration.</small>
-              {fieldError('slotDurationMs')}
+        <button
+          type="button"
+          className={`step-item${step === 2 ? ' active' : ''}${step > 2 ? ' completed' : ''}`}
+          onClick={() => jumpToStep(2)}
+        >
+          <span className="step-number">{step > 2 ? <CheckIcon /> : '2'}</span>
+          <span className="step-label">2. Network</span>
+        </button>
+
+        <div className="step-connector" />
+
+        <button
+          type="button"
+          className={`step-item${step === 3 ? ' active' : ''}${step > 3 ? ' completed' : ''}`}
+          onClick={() => jumpToStep(3)}
+        >
+          <span className="step-number">{step > 3 ? <CheckIcon /> : '3'}</span>
+          <span className="step-label">3. Traffic</span>
+        </button>
+
+        <div className="step-connector" />
+
+        <button
+          type="button"
+          className={`step-item${step === 4 ? ' active' : ''}`}
+          onClick={() => jumpToStep(4)}
+        >
+          <span className="step-number">4</span>
+          <span className="step-label">4. Advanced</span>
+        </button>
+      </div>
+
+      {submitError && <div className="error-message" role="alert">{submitError}</div>}
+      {errors.workload && <div className="error-message" role="alert">{errors.workload}</div>}
+
+      <div className="wizard-layout">
+        <form className="panel wizard-main" onSubmit={handleStartSimulation} noValidate>
+          {/* STEP 1: PROTOCOL */}
+          {step === 1 && (
+            <div className="wizard-step-body">
+              <h2 className="step-title">Step 1: Select MAC Protocol</h2>
+              <p className="step-subtitle">
+                Choose the channel access arbitration mechanism to observe on the shared medium.
+              </p>
+
+              <div className="protocol-select-grid" role="radiogroup" aria-label="MAC Protocol Selection">
+                {protocols.map(p => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    role="radio"
+                    aria-checked={protocol === p.id}
+                    className={`protocol-select-card${protocol === p.id ? ' selected' : ''}`}
+                    onClick={() => {
+                      setProtocol(p.id);
+                      setErrors({});
+                    }}
+                  >
+                    <div className="protocol-select-top">
+                      <strong>{p.name}</strong>
+                      {protocol === p.id && <span className="selection-badge">SELECTED</span>}
+                    </div>
+                    <p className="protocol-select-desc">{p.description}</p>
+                    <div className="protocol-select-preview">
+                      <ProtocolDiagram protocol={p.id} compact />
+                    </div>
+                  </button>
+                ))}
+              </div>
             </div>
           )}
 
-          {protocol === 'CSMA_CD' && (
-            <fieldset className="field-grid protocol-settings">
-              <legend>CSMA/CD collision and backoff settings</legend>
-              <div className="field">
-                <label htmlFor="propagation-delay">Propagation delay (ms)</label>
-                <input id="propagation-delay" type="number" min="0" step="0.01" value={propagationDelayMs} aria-invalid={Boolean(errors.propagationDelayMs)} aria-describedby={describedBy('propagationDelayMs')} onChange={event => setPropagationDelayMs(event.target.value)} />
-                <small>Models the time before another station senses a transmission.</small>
-                {fieldError('propagationDelayMs')}
+          {/* STEP 2: NETWORK PARAMETERS */}
+          {step === 2 && (
+            <div className="wizard-step-body">
+              <h2 className="step-title">Step 2: Network Parameters</h2>
+              <p className="step-subtitle">
+                Configure physical stations, payload sizes, transmission data rate, and experiment duration.
+              </p>
+
+              <div className="field-grid">
+                <div className="field">
+                  <label htmlFor="station-count">Number of Stations (2 to 64)</label>
+                  <input
+                    id="station-count"
+                    type="number"
+                    min="2"
+                    max="64"
+                    step="1"
+                    value={stationCount}
+                    aria-invalid={Boolean(errors.stationCount)}
+                    onChange={e => setStationCount(e.target.value)}
+                  />
+                  <small>Total network nodes contending for channel access.</small>
+                  {fieldError('stationCount')}
+                </div>
+
+                <div className="field">
+                  <label htmlFor="frame-size">Frame Size (Bytes)</label>
+                  <input
+                    id="frame-size"
+                    type="number"
+                    min="64"
+                    max="65535"
+                    step="1"
+                    value={frameSizeBytes}
+                    aria-invalid={Boolean(errors.frameSizeBytes)}
+                    onChange={e => setFrameSizeBytes(e.target.value)}
+                  />
+                  <small>Packet payload length (standard range: 64 to 65,535 bytes).</small>
+                  {fieldError('frameSizeBytes')}
+                </div>
+
+                <div className="field">
+                  <label htmlFor="data-rate">Data Rate (bits per second)</label>
+                  <input
+                    id="data-rate"
+                    type="number"
+                    min="1000"
+                    max="1000000000"
+                    step="1000"
+                    value={dataRateBps}
+                    aria-invalid={Boolean(errors.dataRateBps)}
+                    onChange={e => setDataRateBps(e.target.value)}
+                  />
+                  <small>Raw medium bandwidth (e.g. 1,000,000 bps = 1.0 Mbps).</small>
+                  {fieldError('dataRateBps')}
+                </div>
+
+                <div className="field">
+                  <label htmlFor="duration">Simulation Duration (ms)</label>
+                  <input
+                    id="duration"
+                    type="number"
+                    min="1"
+                    max="120000"
+                    step="100"
+                    value={durationMs}
+                    aria-invalid={Boolean(errors.durationMs)}
+                    onChange={e => setDurationMs(e.target.value)}
+                  />
+                  <small>Virtual time limit for experiment execution (1 to 120,000 ms).</small>
+                  {fieldError('durationMs')}
+                </div>
               </div>
-              <div className="field">
-                <label htmlFor="backoff-slot">Backoff slot duration (ms)</label>
-                <input id="backoff-slot" type="number" min="0.001" step="0.001" value={slotDurationMs} aria-invalid={Boolean(errors.slotDurationMs)} aria-describedby={describedBy('slotDurationMs')} onChange={event => setSlotDurationMs(event.target.value)} />
-                {fieldError('slotDurationMs')}
-              </div>
-              <div className="field">
-                <label htmlFor="max-retries">Maximum retries</label>
-                <input id="max-retries" type="number" min="1" max="32" step="1" value={maxRetries} aria-invalid={Boolean(errors.maxRetries)} aria-describedby={describedBy('maxRetries')} onChange={event => setMaxRetries(event.target.value)} />
-                {fieldError('maxRetries')}
-              </div>
-              <div className="field">
-                <label htmlFor="max-backoff-slots">Maximum backoff slots</label>
-                <input id="max-backoff-slots" type="number" min="1" max="1024" step="1" value={maxBackoffSlots} aria-invalid={Boolean(errors.maxBackoffSlots)} aria-describedby={describedBy('maxBackoffSlots')} onChange={event => setMaxBackoffSlots(event.target.value)} />
-                {fieldError('maxBackoffSlots')}
-              </div>
-            </fieldset>
+            </div>
           )}
 
-          <div className="button-row">
-            <button className="btn primary" type="submit">Start simulation</button>
+          {/* STEP 3: TRAFFIC */}
+          {step === 3 && (
+            <div className="wizard-step-body">
+              <h2 className="step-title">Step 3: Traffic Generation Model</h2>
+              <p className="step-subtitle">
+                Specify frame arrival distribution and load intensity across stations.
+              </p>
+
+              <div className="field-grid">
+                <div className="field">
+                  <label htmlFor="traffic-model">Arrival Model</label>
+                  <select
+                    id="traffic-model"
+                    value={trafficModel}
+                    onChange={e => setTrafficModel(e.target.value as TrafficModel)}
+                  >
+                    <option value="poisson">Poisson Process (Stochastic inter-arrivals)</option>
+                    <option value="uniform">Uniform Intervals (Deterministic periodic load)</option>
+                  </select>
+                  <small>
+                    Poisson models memoryless packet arrivals. Uniform distributes arrivals evenly per station.
+                  </small>
+                </div>
+
+                <div className="field">
+                  <label htmlFor="traffic-intensity">
+                    Traffic Intensity G (frames / frame time / station)
+                  </label>
+                  <input
+                    id="traffic-intensity"
+                    type="number"
+                    min="0.01"
+                    max="5.0"
+                    step="0.05"
+                    value={trafficIntensity}
+                    aria-invalid={Boolean(errors.trafficIntensity)}
+                    onChange={e => setTrafficIntensity(e.target.value)}
+                  />
+                  <small>
+                    Per-station arrival rate normalized to frame transmission duration. G = 0.5 means one arrival every 2 frame times per station.
+                  </small>
+                  {fieldError('trafficIntensity')}
+                </div>
+              </div>
+
+              <div className="panel-inset" style={{ marginTop: 16 }}>
+                <strong>Workload Estimation</strong>
+                <p style={{ margin: '4px 0 0', fontSize: 13 }}>
+                  Frame Transmission Time T_fr: <strong>{formatNumber(frameTimeMs, 3)} ms</strong>
+                  <br />
+                  Estimated Total Frame Generation: <strong>~{estimatedFrames.toLocaleString()} frames</strong>
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* STEP 4: ADVANCED SETTINGS */}
+          {step === 4 && (
+            <div className="wizard-step-body">
+              <h2 className="step-title">Step 4: Advanced Protocol Parameters</h2>
+              <p className="step-subtitle">
+                Configure protocol-specific parameters and pseudorandom seed for experiment repeatability.
+              </p>
+
+              <div className="field-grid">
+                <div className="field">
+                  <label htmlFor="random-seed">Random Seed (Optional)</label>
+                  <input
+                    id="random-seed"
+                    type="number"
+                    min="0"
+                    max="2147483647"
+                    step="1"
+                    value={randomSeed}
+                    aria-invalid={Boolean(errors.randomSeed)}
+                    onChange={e => setRandomSeed(e.target.value)}
+                  />
+                  <small>Integer seed ensures repeatable random packet arrival sequences.</small>
+                  {fieldError('randomSeed')}
+                </div>
+
+                {protocol === 'SLOTTED_ALOHA' && (
+                  <div className="field">
+                    <label htmlFor="slot-duration">Slot Duration (ms)</label>
+                    <input
+                      id="slot-duration"
+                      type="number"
+                      min="0.001"
+                      step="0.001"
+                      value={slotDurationMs}
+                      aria-invalid={Boolean(errors.slotDurationMs)}
+                      onChange={e => setSlotDurationMs(e.target.value)}
+                    />
+                    <small>Discrete time slot boundary length. Usually set equal to frame time.</small>
+                    {fieldError('slotDurationMs')}
+                  </div>
+                )}
+
+                {protocol === 'CSMA_CD' && (
+                  <>
+                    <div className="field">
+                      <label htmlFor="propagation-delay">Propagation Delay (ms)</label>
+                      <input
+                        id="propagation-delay"
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={propagationDelayMs}
+                        aria-invalid={Boolean(errors.propagationDelayMs)}
+                        onChange={e => setPropagationDelayMs(e.target.value)}
+                      />
+                      <small>Medium propagation latency before other stations detect active carrier.</small>
+                      {fieldError('propagationDelayMs')}
+                    </div>
+
+                    <div className="field">
+                      <label htmlFor="backoff-slot">Backoff Slot Duration (ms)</label>
+                      <input
+                        id="backoff-slot"
+                        type="number"
+                        min="0.001"
+                        step="0.001"
+                        value={slotDurationMs}
+                        aria-invalid={Boolean(errors.slotDurationMs)}
+                        onChange={e => setSlotDurationMs(e.target.value)}
+                      />
+                      <small>Base slot time multiplier for binary exponential backoff.</small>
+                      {fieldError('slotDurationMs')}
+                    </div>
+
+                    <div className="field">
+                      <label htmlFor="max-retries">Maximum Retries (1 to 32)</label>
+                      <input
+                        id="max-retries"
+                        type="number"
+                        min="1"
+                        max="32"
+                        step="1"
+                        value={maxRetries}
+                        aria-invalid={Boolean(errors.maxRetries)}
+                        onChange={e => setMaxRetries(e.target.value)}
+                      />
+                      <small>Max transmission attempts before dropping a collided frame.</small>
+                      {fieldError('maxRetries')}
+                    </div>
+
+                    <div className="field">
+                      <label htmlFor="max-backoff-slots">Max Backoff Slots (1 to 1024)</label>
+                      <input
+                        id="max-backoff-slots"
+                        type="number"
+                        min="1"
+                        max="1024"
+                        step="1"
+                        value={maxBackoffSlots}
+                        aria-invalid={Boolean(errors.maxBackoffSlots)}
+                        onChange={e => setMaxBackoffSlots(e.target.value)}
+                      />
+                      <small>Upper ceiling window for truncated binary backoff.</small>
+                      {fieldError('maxBackoffSlots')}
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Wizard Controls */}
+          <div className="wizard-controls">
+            <button
+              className="btn"
+              type="button"
+              disabled={step === 1}
+              onClick={prevStep}
+            >
+              <ArrowLeftIcon />
+              Back
+            </button>
+
+            {step < 4 ? (
+              <button className="btn primary" type="button" onClick={nextStep}>
+                Next Step
+                <ArrowRightIcon />
+              </button>
+            ) : (
+              <button className="btn primary" type="submit">
+                Start Simulation
+                <ArrowRightIcon />
+              </button>
+            )}
           </div>
         </form>
 
-        <aside className="panel" aria-labelledby="summary-heading">
-          <h2 id="summary-heading">Configuration summary</h2>
-          {configPreview ? (
-            <dl className="summary-list">
-              <dt>Protocol</dt><dd>{formatProtocol(configPreview.protocol)}</dd>
-              <dt>Stations</dt><dd>{configPreview.stationCount}</dd>
-              <dt>Frame size</dt><dd>{configPreview.frameSizeBytes.toLocaleString()} bytes</dd>
-              <dt>Data rate</dt><dd>{configPreview.dataRateBps.toLocaleString()} bps</dd>
-              <dt>Duration</dt><dd>{configPreview.durationMs.toLocaleString()} ms</dd>
-              <dt>Traffic model</dt><dd>{configPreview.trafficModel === 'poisson' ? 'Poisson arrivals' : 'Uniform intervals'}</dd>
-              <dt>Traffic intensity</dt><dd>{configPreview.trafficIntensity} frames per frame time per station</dd>
-              <dt>Random seed</dt><dd>{configPreview.randomSeed ?? 'Generated on run start'}</dd>
-              {configPreview.slotDurationMs !== undefined && <><dt>Slot duration</dt><dd>{configPreview.slotDurationMs} ms</dd></>}
-              {configPreview.propagationDelayMs !== undefined && <><dt>Propagation delay</dt><dd>{configPreview.propagationDelayMs} ms</dd></>}
-              {configPreview.maxRetries !== undefined && <><dt>Retry limit</dt><dd>{configPreview.maxRetries}</dd></>}
-              {configPreview.maxBackoffSlots !== undefined && <><dt>Backoff limit</dt><dd>{configPreview.maxBackoffSlots} slots</dd></>}
-            </dl>
-          ) : (
-            <p className="muted">Correct the highlighted values to review this configuration.</p>
-          )}
+        {/* Live Configuration Summary Panel */}
+        <aside className="panel wizard-aside" aria-labelledby="summary-heading">
+          <h2 id="summary-heading" style={{ fontSize: 16, marginBottom: 12 }}>
+            Configuration Summary
+          </h2>
+
+          <dl className="summary-list">
+            <dt>Protocol</dt>
+            <dd><strong>{formatProtocol(protocol)}</strong></dd>
+
+            <dt>Stations</dt>
+            <dd>{stationCount}</dd>
+
+            <dt>Frame Size</dt>
+            <dd>{Number(frameSizeBytes).toLocaleString()} bytes</dd>
+
+            <dt>Data Rate</dt>
+            <dd>{(Number(dataRateBps) / 1000).toLocaleString()} kbps</dd>
+
+            <dt>Duration</dt>
+            <dd>{Number(durationMs).toLocaleString()} ms</dd>
+
+            <dt>Traffic Model</dt>
+            <dd>{trafficModel === 'poisson' ? 'Poisson arrivals' : 'Uniform intervals'}</dd>
+
+            <dt>Intensity G</dt>
+            <dd>{trafficIntensity} frames/Tfr/station</dd>
+
+            <dt>Frame Time T_fr</dt>
+            <dd className="mono">{formatNumber(frameTimeMs, 3)} ms</dd>
+
+            <dt>Estimated Load</dt>
+            <dd className="mono">~{estimatedFrames.toLocaleString()} frames</dd>
+
+            <dt>Random Seed</dt>
+            <dd className="mono">{randomSeed.trim() || 'Unset (Random)'}</dd>
+
+            {protocol === 'SLOTTED_ALOHA' && (
+              <>
+                <dt>Slot Duration</dt>
+                <dd className="mono">{slotDurationMs} ms</dd>
+              </>
+            )}
+
+            {protocol === 'CSMA_CD' && (
+              <>
+                <dt>Prop Delay</dt>
+                <dd className="mono">{propagationDelayMs} ms</dd>
+                <dt>Max Retries</dt>
+                <dd>{maxRetries}</dd>
+                <dt>Backoff Limit</dt>
+                <dd>{maxBackoffSlots} slots</dd>
+              </>
+            )}
+          </dl>
+
+          <div className="panel-inset" style={{ marginTop: 16 }}>
+            <span className="muted" style={{ fontSize: 11, display: 'block' }}>
+              Execution note: Simulation will run on the authoritative engine using real-time event dispatch.
+            </span>
+          </div>
         </aside>
       </div>
     </div>

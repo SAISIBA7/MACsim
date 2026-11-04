@@ -9,8 +9,9 @@ import History from './pages/History';
 import Settings from './pages/Settings';
 import Terms from './pages/Terms';
 import Privacy from './pages/Privacy';
+import { BrandWaveformIcon } from './components/Icons';
 
-type ThemePreference = 'system' | 'light' | 'dark';
+type ThemePreference = 'light' | 'dark';
 
 const navigation = [
   { to: '/', label: 'Home', end: true },
@@ -30,33 +31,40 @@ function SimulationRoute() {
 export default function App() {
   const [theme, setTheme] = useState<ThemePreference>(() => {
     const stored = localStorage.getItem('theme');
-    return stored === 'light' || stored === 'dark' ? stored : 'system';
+    return stored === 'light' ? 'light' : 'dark';
   });
   const [navOpen, setNavOpen] = useState(false);
 
   useEffect(() => {
-    const media = window.matchMedia('(prefers-color-scheme: dark)');
-    const applyTheme = () => {
-      const activeTheme = theme === 'system' ? (media.matches ? 'dark' : 'light') : theme;
-      document.documentElement.dataset.theme = activeTheme;
-    };
-    applyTheme();
+    document.documentElement.dataset.theme = theme;
     localStorage.setItem('theme', theme);
-    if (theme === 'system') {
-      media.addEventListener('change', applyTheme);
-      return () => media.removeEventListener('change', applyTheme);
-    }
   }, [theme]);
 
   return (
-    <div className="layout">
-      <a className="skip-link" href="#main-content">Skip to content</a>
-      <aside className={`nav-shell${navOpen ? ' nav-open' : ''}`} aria-label="Application navigation">
-        <div className="nav-top">
-          <NavLink className="brand" to="/" aria-label="MACSim home" onClick={() => setNavOpen(false)}>
-            <span className="brand-mark" aria-hidden="true">M</span>
-            <span>MACSim</span>
+    <div className="app-shell">
+      <a className="skip-link" href="#main-content">
+        Skip to content
+      </a>
+
+      {/* Persistent 220px Left Navigation Sidebar */}
+      <aside
+        className={`sidebar${navOpen ? ' nav-open' : ''}`}
+        aria-label="Application navigation"
+      >
+        <div className="sidebar-top">
+          <NavLink
+            className="brand"
+            to="/"
+            aria-label="MACSim Home"
+            onClick={() => setNavOpen(false)}
+          >
+            <BrandWaveformIcon className="brand-mark" />
+            <div className="brand-text">
+              <span className="brand-title">MACSim</span>
+              <span className="brand-subtitle mono">PROTOCOL LAB</span>
+            </div>
           </NavLink>
+
           <button
             className="nav-toggle"
             type="button"
@@ -64,10 +72,11 @@ export default function App() {
             aria-expanded={navOpen}
             onClick={() => setNavOpen(open => !open)}
           >
-            {navOpen ? 'Close menu' : 'Menu'}
+            {navOpen ? 'Close Menu' : 'Menu'}
           </button>
         </div>
-        <nav className="nav-links" id="primary-navigation" aria-label="Primary">
+
+        <nav className="nav-links" id="primary-navigation" aria-label="Primary Navigation">
           {navigation.map(item => (
             <NavLink
               key={item.to}
@@ -80,24 +89,33 @@ export default function App() {
             </NavLink>
           ))}
         </nav>
-        <div className="nav-bottom">
-          <label htmlFor="theme-preference">Appearance</label>
-          <select
-            id="theme-preference"
-            value={theme}
-            onChange={event => setTheme(event.target.value as ThemePreference)}
-          >
-            <option value="system">System</option>
-            <option value="light">Light</option>
-            <option value="dark">Dark</option>
-          </select>
+
+        <div className="sidebar-bottom">
+          <div className="theme-selector-wrap">
+            <label htmlFor="theme-preference">Appearance</label>
+            <select
+              id="theme-preference"
+              value={theme}
+              onChange={event => setTheme(event.target.value as ThemePreference)}
+            >
+              <option value="dark">Dark Charcoal</option>
+              <option value="light">Warm Light</option>
+            </select>
+          </div>
+
           <div className="legal-links">
-            <NavLink to="/terms" onClick={() => setNavOpen(false)}>Terms of Service</NavLink>
-            <NavLink to="/privacy" onClick={() => setNavOpen(false)}>Privacy Policy</NavLink>
+            <NavLink to="/terms" onClick={() => setNavOpen(false)}>
+              Terms of Service
+            </NavLink>
+            <NavLink to="/privacy" onClick={() => setNavOpen(false)}>
+              Privacy Policy
+            </NavLink>
           </div>
         </div>
       </aside>
-      <main className="main" id="main-content" tabIndex={-1}>
+
+      {/* Main Workspace Canvas (PRD 6.1: min-width: 0, full remaining width) */}
+      <main className="main-workspace" id="main-content" tabIndex={-1}>
         <div className="main-content">
           <Routes>
             <Route path="/" element={<Home />} />
