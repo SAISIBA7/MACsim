@@ -19,6 +19,7 @@ import {
   resumeSimulation,
   stepSimulation,
   resetSimulation,
+  setSimulationSpeed,
 } from '../api/simulations';
 import { subscribeToSimulationStream, getSimulationEvents } from '../api/events';
 import { HttpResponseError, NetworkError } from '../api/client';
@@ -299,6 +300,15 @@ export default function SimRun({ runId }: { runId: string }) {
     }
   }, [events.length, autoScroll]);
 
+  const handleSpeedChange = async (newSpeed: number) => {
+    setSpeed(newSpeed);
+    try {
+      await setSimulationSpeed(runId, newSpeed);
+    } catch {
+      // Non-fatal, local speed state is maintained
+    }
+  };
+
   // Simulation Control Handlers
   const handleStart = async () => {
     if (actionPending) return;
@@ -306,6 +316,7 @@ export default function SimRun({ runId }: { runId: string }) {
     setActionError('');
     try {
       const updated = await startSimulation(runId);
+      setSimulationSpeed(runId, speed).catch(() => {});
       setStatus(updated.status);
       if (updated.stations) setStations(updated.stations);
       if (updated.metrics) setMetrics(updated.metrics);
@@ -344,6 +355,7 @@ export default function SimRun({ runId }: { runId: string }) {
     setActionError('');
     try {
       const updated = await resumeSimulation(runId);
+      setSimulationSpeed(runId, speed).catch(() => {});
       setStatus(updated.status);
       if (updated.stations) setStations(updated.stations);
       if (updated.metrics) setMetrics(updated.metrics);
@@ -554,17 +566,17 @@ export default function SimRun({ runId }: { runId: string }) {
           </button>
         </div>
 
-        <div className="toolbar-controls-right">
-          <div className="speed-selector-group">
-            <label htmlFor="playback-speed" style={{ fontSize: 12 }}>
+        <div className="toolbar-controls-right" style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <div className="speed-selector-group" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <label htmlFor="playback-speed" style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>
               Playback Speed:
             </label>
             <select
               id="playback-speed"
               value={speed}
               disabled={status === 'Completed'}
-              onChange={(event) => setSpeed(Number(event.target.value))}
-              style={{ width: 'auto', minHeight: 30, padding: '2px 8px' }}
+              onChange={(event) => handleSpeedChange(Number(event.target.value))}
+              style={{ width: 'auto', minHeight: 32, padding: '2px 8px' }}
             >
               <option value="0.25">0.25x</option>
               <option value="0.5">0.5x</option>
@@ -572,6 +584,24 @@ export default function SimRun({ runId }: { runId: string }) {
               <option value="2">2.0x (Fast)</option>
               <option value="4">4.0x (Max)</option>
             </select>
+          </div>
+
+          <div
+            style={{
+              width: 1,
+              height: 22,
+              background: 'var(--color-border)',
+              margin: '0 4px',
+            }}
+          />
+
+          <div className="button-row" style={{ margin: 0 }}>
+            <Link className="btn" to="/simulations/new">
+              New Simulation
+            </Link>
+            <Link className="btn" to={runId ? `/comparisons?ids=${runId}` : '/comparisons'}>
+              Compare Results
+            </Link>
           </div>
         </div>
       </section>
@@ -999,16 +1029,6 @@ export default function SimRun({ runId }: { runId: string }) {
               <dd className="mono">{config.randomSeed ?? 'Not recorded'}</dd>
             </dl>
           </section>
-
-          {/* Action Links */}
-          <div className="button-row">
-            <Link className="btn" to="/simulations/new">
-              New Simulation
-            </Link>
-            <Link className="btn" to="/comparisons">
-              Compare Results
-            </Link>
-          </div>
         </aside>
       </div>
     </div>

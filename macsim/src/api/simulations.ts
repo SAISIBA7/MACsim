@@ -101,3 +101,15 @@ export async function resetSimulation(id: string): Promise<SimulationSnapshot> {
   );
 }
 
+export async function setSimulationSpeed(
+  id: string,
+  speed: number,
+): Promise<{ simulationId: string; playbackSpeed: number }> {
+  return apiRequest<{ simulationId: string; playbackSpeed: number }>(
+    `/simulations/${encodeURIComponent(id)}/speed`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ speed }),
+    },
+  );
+}

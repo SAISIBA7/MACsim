@@ -56,7 +56,7 @@ export default function NewSim() {
   const [trafficModel, setTrafficModel] = useState<TrafficModel>(defaults.trafficModel);
   const [trafficIntensity, setTrafficIntensity] = useState(String(defaults.trafficIntensity));
 
-  // Step 4: Advanced
+  // Step 4: Simulation
   const [randomSeed, setRandomSeed] = useState('42');
   const [slotDurationMs, setSlotDurationMs] = useState('8.192');
   const [propagationDelayMs, setPropagationDelayMs] = useState('0.25');
@@ -255,7 +255,7 @@ export default function NewSim() {
           onClick={() => jumpToStep(1)}
         >
           <span className="step-number">{step > 1 ? <CheckIcon /> : '1'}</span>
-          <span className="step-label">1. Protocol</span>
+          <span className="step-label">Protocol</span>
         </button>
 
         <div className="step-connector" />
@@ -266,7 +266,7 @@ export default function NewSim() {
           onClick={() => jumpToStep(2)}
         >
           <span className="step-number">{step > 2 ? <CheckIcon /> : '2'}</span>
-          <span className="step-label">2. Network</span>
+          <span className="step-label">Network</span>
         </button>
 
         <div className="step-connector" />
@@ -277,7 +277,7 @@ export default function NewSim() {
           onClick={() => jumpToStep(3)}
         >
           <span className="step-number">{step > 3 ? <CheckIcon /> : '3'}</span>
-          <span className="step-label">3. Traffic</span>
+          <span className="step-label">Traffic</span>
         </button>
 
         <div className="step-connector" />
@@ -288,7 +288,7 @@ export default function NewSim() {
           onClick={() => jumpToStep(4)}
         >
           <span className="step-number">4</span>
-          <span className="step-label">4. Advanced</span>
+          <span className="step-label">Simulation</span>
         </button>
       </div>
 
@@ -464,10 +464,10 @@ export default function NewSim() {
             </div>
           )}
 
-          {/* STEP 4: ADVANCED SETTINGS */}
+          {/* STEP 4: SIMULATION SETTINGS */}
           {step === 4 && (
             <div className="wizard-step-body">
-              <h2 className="step-title">Step 4: Advanced Protocol Parameters</h2>
+              <h2 className="step-title">Step 4: Simulation Parameters</h2>
               <p className="step-subtitle">
                 Configure protocol-specific parameters and pseudorandom seed for experiment repeatability.
               </p>

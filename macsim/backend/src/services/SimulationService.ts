@@ -18,6 +18,7 @@ export class SimulationService {
   private static instance: SimulationService;
   private engines: Map<string, SimulationEngine> = new Map();
   private activeRunners: Map<string, ActiveRunner> = new Map();
+  private speeds: Map<string, number> = new Map();
   private simRepo: SimulationRepository;
   private eventRepo: EventRepository;
   private sseManager: SSEManager;
