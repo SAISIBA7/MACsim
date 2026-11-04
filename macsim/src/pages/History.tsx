@@ -114,7 +114,9 @@ export default function History({ title }: { title: string }) {
   };
 
   const handleCompareSelected = () => {
-    if (selectedIds.length >= 2) {
+    if (selectedIds.length === 2) {
+      navigate(`/comparisons/analysis?a=${encodeURIComponent(selectedIds[0])}&b=${encodeURIComponent(selectedIds[1])}`);
+    } else if (selectedIds.length > 2) {
       navigate(`/comparisons?ids=${selectedIds.join(',')}`);
     }
   };

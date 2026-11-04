@@ -300,27 +300,29 @@ export default function SimRun({ runId }: { runId: string }) {
     }
   }, [events.length, autoScroll]);
 
+  // Simulation Control Handlers
   const handleSpeedChange = async (newSpeed: number) => {
     setSpeed(newSpeed);
     try {
       await setSimulationSpeed(runId, newSpeed);
     } catch {
-      // Non-fatal, local speed state is maintained
+      // Backend may be offline or simulation not active
     }
   };
 
-  // Simulation Control Handlers
   const handleStart = async () => {
     if (actionPending) return;
     setActionPending(true);
     setActionError('');
     try {
       const updated = await startSimulation(runId);
-      setSimulationSpeed(runId, speed).catch(() => {});
       setStatus(updated.status);
       if (updated.stations) setStations(updated.stations);
       if (updated.metrics) setMetrics(updated.metrics);
       if (updated.medium) setMedium(updated.medium);
+      if (speed !== 1) {
+        setSimulationSpeed(runId, speed).catch(() => {});
+      }
     } catch (err: unknown) {
       setActionError(
         err instanceof Error ? err.message : 'Failed to start simulation',
@@ -355,11 +357,13 @@ export default function SimRun({ runId }: { runId: string }) {
     setActionError('');
     try {
       const updated = await resumeSimulation(runId);
-      setSimulationSpeed(runId, speed).catch(() => {});
       setStatus(updated.status);
       if (updated.stations) setStations(updated.stations);
       if (updated.metrics) setMetrics(updated.metrics);
       if (updated.medium) setMedium(updated.medium);
+      if (speed !== 1) {
+        setSimulationSpeed(runId, speed).catch(() => {});
+      }
     } catch (err: unknown) {
       setActionError(
         err instanceof Error ? err.message : 'Failed to resume simulation',
@@ -566,9 +570,9 @@ export default function SimRun({ runId }: { runId: string }) {
           </button>
         </div>
 
-        <div className="toolbar-controls-right" style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-          <div className="speed-selector-group" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <label htmlFor="playback-speed" style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>
+        <div className="toolbar-controls-right" style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <div className="speed-selector-group">
+            <label htmlFor="playback-speed" style={{ fontSize: 12 }}>
               Playback Speed:
             </label>
             <select
@@ -576,7 +580,7 @@ export default function SimRun({ runId }: { runId: string }) {
               value={speed}
               disabled={status === 'Completed'}
               onChange={(event) => handleSpeedChange(Number(event.target.value))}
-              style={{ width: 'auto', minHeight: 32, padding: '2px 8px' }}
+              style={{ width: 'auto', minHeight: 30, padding: '2px 8px' }}
             >
               <option value="0.25">0.25x</option>
               <option value="0.5">0.5x</option>
@@ -586,23 +590,14 @@ export default function SimRun({ runId }: { runId: string }) {
             </select>
           </div>
 
-          <div
-            style={{
-              width: 1,
-              height: 22,
-              background: 'var(--color-border)',
-              margin: '0 4px',
-            }}
-          />
+          <div style={{ width: 1, height: 20, background: 'var(--color-border)' }} aria-hidden="true" />
 
-          <div className="button-row" style={{ margin: 0 }}>
-            <Link className="btn" to="/simulations/new">
-              New Simulation
-            </Link>
-            <Link className="btn" to={runId ? `/comparisons?ids=${runId}` : '/comparisons'}>
-              Compare Results
-            </Link>
-          </div>
+          <Link className="btn" to="/simulations/new" style={{ minHeight: 30, padding: '2px 10px', fontSize: 12 }}>
+            New Simulation
+          </Link>
+          <Link className="btn" to={`/comparisons?ids=${encodeURIComponent(runId)}`} style={{ minHeight: 30, padding: '2px 10px', fontSize: 12 }}>
+            Compare Results
+          </Link>
         </div>
       </section>
 

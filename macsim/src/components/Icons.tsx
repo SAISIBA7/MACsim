@@ -164,3 +164,21 @@ export function ArrowLeftIcon(props: IconProps) {
   );
 }
 
+export function SwapIcon(props: IconProps) {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="square"
+      aria-hidden="true"
+      {...props}
+    >
+      <path d="M14 5H2M5 2L2 5l3 3M2 11h12m-3-3l3 3-3 3" />
+    </svg>
+  );
+}
+

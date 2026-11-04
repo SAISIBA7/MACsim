@@ -4,12 +4,13 @@ import Home from './pages/Home';
 import NewSim from './pages/NewSim';
 import SimRun from './pages/SimRun';
 import Comparisons from './pages/Comparisons';
+import ComparisonAnalysis from './pages/ComparisonAnalysis';
 import Learning from './pages/Learning';
 import History from './pages/History';
 import Settings from './pages/Settings';
 import Terms from './pages/Terms';
 import Privacy from './pages/Privacy';
-import { BrandWaveformIcon } from './components/Icons';
+import { BrandWaveformIcon, ArrowRightIcon } from './components/Icons';
 
 type ThemePreference = 'light' | 'dark';
 
@@ -84,7 +85,8 @@ export default function App() {
               className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}
               onClick={() => setNavOpen(false)}
             >
-              {item.label}
+              <span className="nav-label">{item.label}</span>
+              <ArrowRightIcon className="nav-arrow" width="12" height="12" aria-hidden="true" />
             </NavLink>
           ))}
         </nav>
@@ -122,6 +124,8 @@ export default function App() {
             <Route path="/simulations" element={<History title="Simulation History" />} />
             <Route path="/simulations/:id" element={<SimulationRoute />} />
             <Route path="/comparisons" element={<Comparisons />} />
+            <Route path="/comparisons/analysis" element={<ComparisonAnalysis />} />
+            <Route path="/comparisons/:idA/:idB" element={<ComparisonAnalysis />} />
             <Route path="/learning" element={<Learning />} />
             <Route path="/history" element={<Navigate to="/simulations" replace />} />
             <Route path="/settings" element={<Settings theme={theme} setTheme={setTheme} />} />

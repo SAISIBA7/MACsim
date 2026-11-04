@@ -1,34 +1,11 @@
-import { useEffect, useMemo, useState, useCallback } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { useEffect, useState, useCallback, useMemo } from 'react';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { getRuns, type RunRecord } from '../store/runs';
 import { formatNumber, formatProtocol } from '../utils/format';
 import type { Protocol } from '../types';
-import { getSimulations, getSimulation } from '../api/simulations';
+import { getSimulations } from '../api/simulations';
 import { runSweep } from '../api/comparisons';
-
-type MetricKey =
-  | 'throughputBps'
-  | 'collisions'
-  | 'retransmissions'
-  | 'channelUtilization'
-  | 'averageDelayMs'
-  | 'successfulFrames';
-
-interface MetricMeta {
-  key: MetricKey;
-  label: string;
-  unit: string;
-  fractionDigits: number;
-}
-
-const metricsList: MetricMeta[] = [
-  { key: 'throughputBps', label: 'Throughput', unit: 'bps', fractionDigits: 1 },
-  { key: 'collisions', label: 'Collision Incidents', unit: 'events', fractionDigits: 0 },
-  { key: 'retransmissions', label: 'Retransmissions', unit: 'frames', fractionDigits: 0 },
-  { key: 'channelUtilization', label: 'Channel Utilization', unit: '%', fractionDigits: 1 },
-  { key: 'averageDelayMs', label: 'Average Delay', unit: 'ms', fractionDigits: 2 },
-  { key: 'successfulFrames', label: 'Successful Frames', unit: 'frames', fractionDigits: 0 },
-];
+import { ArrowRightIcon } from '../components/Icons';
 
 const protocolColors: Record<Protocol, string> = {
   PURE_ALOHA: '#DDB487',
@@ -37,101 +14,27 @@ const protocolColors: Record<Protocol, string> = {
   CSMA_CD: '#D5A45D',
 };
 
-function checkMatchingConditions(runs: RunRecord[]): {
-  isFair: boolean;
-  differences: string[];
-} {
-  if (runs.length < 2) return { isFair: true, differences: [] };
-  const first = runs[0].config;
-  const differences: string[] = [];
-
-  const diffStations = runs.some(r => r.config.stationCount !== first.stationCount);
-  const diffFrame = runs.some(r => r.config.frameSizeBytes !== first.frameSizeBytes);
-  const diffRate = runs.some(r => r.config.dataRateBps !== first.dataRateBps);
-  const diffDuration = runs.some(r => r.config.durationMs !== first.durationMs);
-  const diffModel = runs.some(r => r.config.trafficModel !== first.trafficModel);
-  const diffIntensity = runs.some(r => r.config.trafficIntensity !== first.trafficIntensity);
-  const diffSeed = runs.some(r => r.config.randomSeed !== first.randomSeed);
-
-  if (diffStations) differences.push('Station count');
-  if (diffFrame) differences.push('Frame size');
-  if (diffRate) differences.push('Data rate');
-  if (diffDuration) differences.push('Duration');
-  if (diffModel) differences.push('Traffic model');
-  if (diffIntensity) differences.push('Traffic intensity');
-  if (diffSeed) differences.push('Random seed');
-
-  return {
-    isFair: differences.length === 0,
-    differences,
-  };
-}
-
-function generateKeyInsight(selectedRuns: RunRecord[], activeMetric: MetricKey): string {
-  if (selectedRuns.length < 2) {
-    return 'Select at least two simulation runs to generate comparative protocol insights.';
-  }
-
-  const { isFair, differences } = checkMatchingConditions(selectedRuns);
-  if (!isFair) {
-    return `Caution: The compared experiments vary in ${differences.join(', ')}. Outcome variances reflect different experimental workloads rather than protocol mechanisms alone.`;
-  }
-
-  const pureAloha = selectedRuns.find(r => r.config.protocol === 'PURE_ALOHA');
-  const slottedAloha = selectedRuns.find(r => r.config.protocol === 'SLOTTED_ALOHA');
-  const csma = selectedRuns.find(r => r.config.protocol === 'CSMA');
-  const csmaCd = selectedRuns.find(r => r.config.protocol === 'CSMA_CD');
-
-  if (activeMetric === 'throughputBps' && pureAloha && slottedAloha) {
-    const s1 = pureAloha.metrics.throughputBps ?? 0;
-    const s2 = slottedAloha.metrics.throughputBps ?? 0;
-    if (s1 > 0) {
-      const pct = (((s2 - s1) / s1) * 100).toFixed(1);
-      return `Under matching workload, Slotted ALOHA achieved a throughput difference of ${pct}% relative to Pure ALOHA due to slot boundary synchronization halving the vulnerable interval from 2T to T.`;
-    }
-  }
-
-  if (activeMetric === 'collisions' && (pureAloha || slottedAloha) && csma) {
-    const alohaCol = (slottedAloha ?? pureAloha)!.metrics.collisions;
-    const csmaCol = csma.metrics.collisions;
-    return `Carrier sensing reduced collision incidents from ${alohaCol} in ALOHA to ${csmaCol} in CSMA by verifying channel idle state before attempting transmission.`;
-  }
-
-  if (activeMetric === 'averageDelayMs' && csmaCd && csma) {
-    const cdDelay = csmaCd.metrics.averageDelayMs;
-    const csDelay = csma.metrics.averageDelayMs;
-    if (cdDelay !== undefined && csDelay !== undefined) {
-      return `CSMA/CD recorded an average frame delivery delay of ${cdDelay.toFixed(2)} ms versus ${csDelay.toFixed(2)} ms for CSMA as collision aborting expedited queue re-arbitration.`;
-    }
-  }
-
-  const sorted = [...selectedRuns].sort((a, b) => {
-    const va = (a.metrics[activeMetric] as number | undefined) ?? 0;
-    const vb = (b.metrics[activeMetric] as number | undefined) ?? 0;
-    return vb - va;
-  });
-
-  const best = sorted[0];
-  const lowest = sorted[sorted.length - 1];
-  const bestVal = (best.metrics[activeMetric] as number | undefined) ?? 0;
-  const lowestVal = (lowest.metrics[activeMetric] as number | undefined) ?? 0;
-
-  return `Across the ${selectedRuns.length} matching runs, ${formatProtocol(best.config.protocol)} recorded the highest ${activeMetric} (${formatNumber(bestVal, 1)}), compared to ${formatProtocol(lowest.config.protocol)} (${formatNumber(lowestVal, 1)}).`;
-}
+type SortField = 'date' | 'throughput' | 'collisions' | 'stations' | 'duration';
+type SortOrder = 'asc' | 'desc';
 
 export default function Comparisons() {
+  const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const requestedIds = searchParams.get('ids')?.split(',').filter(Boolean);
 
   const [runs, setRuns] = useState<RunRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [selectionWarning, setSelectionWarning] = useState('');
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
-  const [activeMetricKey, setActiveMetricKey] = useState<MetricKey>('throughputBps');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [protocolFilter, setProtocolFilter] = useState<string>('ALL');
+  const [sortField, setSortField] = useState<SortField>('date');
+  const [sortOrder, setSortOrder] = useState<SortOrder>('desc');
   const [isSweeping, setIsSweeping] = useState(false);
   const [sweepMessage, setSweepMessage] = useState('');
 
-  const loadComparisonRuns = useCallback(async () => {
+  const loadRuns = useCallback(async () => {
     setLoading(true);
     setError('');
 
@@ -181,32 +84,11 @@ export default function Comparisons() {
       // Ignore local storage error
     }
 
-    // 3. If specific requested IDs are passed, make sure they are included
-    if (requestedIds && requestedIds.length > 0) {
-      for (const id of requestedIds) {
-        if (!records.some(r => r.id === id)) {
-          try {
-            const snap = await getSimulation(id);
-            records.push({
-              id: snap.id,
-              config: snap.configuration,
-              metrics: snap.metrics,
-              createdAt: snap.createdAt,
-              events: [],
-              stations: snap.stations,
-            });
-          } catch {
-            // Not found on server
-          }
-        }
-      }
-    }
-
     setRuns(records);
 
-    // Set initial selection
+    // Initialize selection: prefer requestedIds (clamped to 2) or first 2
     if (requestedIds && requestedIds.length > 0) {
-      setSelectedIds(requestedIds.filter(id => records.some(r => r.id === id)));
+      setSelectedIds(requestedIds.filter(id => records.some(r => r.id === id)).slice(0, 2));
     } else {
       setSelectedIds(records.slice(0, 2).map(r => r.id));
     }
@@ -215,8 +97,8 @@ export default function Comparisons() {
   }, [requestedIds]);
 
   useEffect(() => {
-    loadComparisonRuns();
-  }, [loadComparisonRuns]);
+    loadRuns();
+  }, [loadRuns]);
 
   const handleRunSweep = async () => {
     setIsSweeping(true);
@@ -240,8 +122,7 @@ export default function Comparisons() {
         `Sweep completed successfully! Generated ${result.runs.length} comparative benchmark runs across 4 protocols.`,
       );
 
-      // Refresh list to include new benchmark runs
-      await loadComparisonRuns();
+      await loadRuns();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Parameter sweep benchmark failed.');
       setSweepMessage('');
@@ -250,41 +131,91 @@ export default function Comparisons() {
     }
   };
 
-  const selectedRuns = useMemo(
-    () => runs.filter(run => selectedIds.includes(run.id)),
-    [runs, selectedIds],
-  );
-
-  const { isFair, differences } = checkMatchingConditions(selectedRuns);
-  const activeMetricMeta = metricsList.find(m => m.key === activeMetricKey)!;
-  const keyInsight = useMemo(
-    () => generateKeyInsight(selectedRuns, activeMetricKey),
-    [selectedRuns, activeMetricKey],
-  );
-
   const toggleRun = (id: string) => {
-    setSelectedIds(curr =>
-      curr.includes(id) ? curr.filter(item => item !== id) : [...curr, id],
-    );
+    setSelectionWarning('');
+
+    if (selectedIds.includes(id)) {
+      // Deselect
+      setSelectedIds(curr => curr.filter(item => item !== id));
+      return;
+    }
+
+    if (selectedIds.length < 2) {
+      // Add
+      setSelectedIds(curr => [...curr, id]);
+    } else {
+      // Prevent 3rd selection
+      setSelectionWarning(
+        'Comparison requires exactly two experiments. Deselect an experiment first to choose another.',
+      );
+    }
   };
 
-  const metricValues = selectedRuns.map(r => {
-    let raw = r.metrics[activeMetricKey] as number | undefined;
-    if (activeMetricKey === 'channelUtilization' && raw !== undefined) {
-      raw = raw * 100;
+  const handleClearSelection = () => {
+    setSelectedIds([]);
+    setSelectionWarning('');
+  };
+
+  const handleCompareClick = () => {
+    if (selectedIds.length !== 2) return;
+    navigate(`/comparisons/analysis?a=${encodeURIComponent(selectedIds[0])}&b=${encodeURIComponent(selectedIds[1])}`);
+  };
+
+  // Filter & sort
+  const filteredRuns = useMemo(() => {
+    let result = [...runs];
+
+    if (protocolFilter !== 'ALL') {
+      result = result.filter(r => r.config.protocol === protocolFilter);
     }
-    return raw ?? 0;
-  });
-  const maxChartValue = Math.max(1, ...metricValues);
-  const chartTrackWidth = 480;
+
+    if (searchQuery.trim().length > 0) {
+      const q = searchQuery.toLowerCase().trim();
+      result = result.filter(
+        r =>
+          r.id.toLowerCase().includes(q) ||
+          r.config.protocol.toLowerCase().includes(q) ||
+          formatProtocol(r.config.protocol).toLowerCase().includes(q),
+      );
+    }
+
+    result.sort((a, b) => {
+      let comparison = 0;
+      switch (sortField) {
+        case 'throughput':
+          comparison = (b.metrics.throughputBps ?? 0) - (a.metrics.throughputBps ?? 0);
+          break;
+        case 'collisions':
+          comparison = (b.metrics.collisions ?? 0) - (a.metrics.collisions ?? 0);
+          break;
+        case 'stations':
+          comparison = b.config.stationCount - a.config.stationCount;
+          break;
+        case 'duration':
+          comparison = b.config.durationMs - a.config.durationMs;
+          break;
+        case 'date':
+        default:
+          comparison = new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+          break;
+      }
+      return sortOrder === 'asc' ? -comparison : comparison;
+    });
+
+    return result;
+  }, [runs, protocolFilter, searchQuery, sortField, sortOrder]);
+
+  const selectedRunA = runs.find(r => r.id === selectedIds[0]);
+  const selectedRunB = runs.find(r => r.id === selectedIds[1]);
 
   return (
     <div className="comparisons-workspace">
+      {/* Header */}
       <header className="page-header">
         <div>
           <h1>Protocol Comparison</h1>
           <p>
-            Evaluate protocol efficiency, collision rates, and delay characteristics across experimental runs.
+            Select two simulation experiments to perform a comparative performance and protocol analysis.
           </p>
         </div>
         <div className="button-row">
@@ -305,21 +236,228 @@ export default function Comparisons() {
 
       {sweepMessage && (
         <div className="comparison-fair-note" role="status" style={{ marginBottom: 16 }}>
-          <strong style={{ color: '#78B978' }}>Sweep Status: </strong>{sweepMessage}
+          <strong style={{ color: '#78B978' }}>Sweep Status: </strong>
+          {sweepMessage}
         </div>
       )}
 
       {error && <div className="error-message" role="alert">{error}</div>}
 
+      {/* Prominent Compare Action Bar */}
+      <section
+        className="panel"
+        style={{
+          marginBottom: 20,
+          background: 'var(--color-surface)',
+          borderColor: selectedIds.length === 2 ? 'var(--color-accent)' : 'var(--color-border)',
+          borderWidth: 1,
+        }}
+        aria-label="Experiment comparison action toolbar"
+      >
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            flexWrap: 'wrap',
+            gap: 16,
+          }}
+        >
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
+              <span className="mono" style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-accent)' }}>
+                EXPERIMENT SELECTION
+              </span>
+              <span
+                className="mono"
+                style={{
+                  fontSize: 11,
+                  padding: '2px 8px',
+                  border: '1px solid',
+                  borderColor: selectedIds.length === 2 ? '#78B978' : '#D5A45D',
+                  color: selectedIds.length === 2 ? '#78B978' : '#D5A45D',
+                }}
+              >
+                {selectedIds.length} / 2 SELECTED
+              </span>
+            </div>
+
+            {selectedIds.length === 0 && (
+              <p className="muted" style={{ margin: 0, fontSize: 12.5 }}>
+                Select two experiments from the table below to compare protocols and metrics side by side.
+              </p>
+            )}
+
+            {selectedIds.length === 1 && selectedRunA && (
+              <p style={{ margin: 0, fontSize: 12.5 }}>
+                <strong>Experiment A: </strong>
+                <span className="mono" style={{ color: protocolColors[selectedRunA.config.protocol] }}>
+                  {formatProtocol(selectedRunA.config.protocol)} ({selectedRunA.id.slice(0, 8)})
+                </span>
+                <span className="muted"> · Select 1 more experiment below to proceed.</span>
+              </p>
+            )}
+
+            {selectedIds.length === 2 && selectedRunA && selectedRunB && (
+              <p style={{ margin: 0, fontSize: 12.5 }}>
+                <strong>Experiment A: </strong>
+                <span className="mono" style={{ color: protocolColors[selectedRunA.config.protocol] }}>
+                  {formatProtocol(selectedRunA.config.protocol)} ({selectedRunA.id.slice(0, 8)})
+                </span>
+                <span className="muted" style={{ margin: '0 8px' }}>vs</span>
+                <strong>Experiment B: </strong>
+                <span className="mono" style={{ color: protocolColors[selectedRunB.config.protocol] }}>
+                  {formatProtocol(selectedRunB.config.protocol)} ({selectedRunB.id.slice(0, 8)})
+                </span>
+              </p>
+            )}
+          </div>
+
+          <div className="button-row" style={{ alignItems: 'center', gap: 8 }}>
+            {selectedIds.length > 0 && (
+              <button
+                className="btn"
+                type="button"
+                onClick={handleClearSelection}
+                style={{ fontSize: 12, minHeight: 32 }}
+              >
+                Clear Selection
+              </button>
+            )}
+
+            <button
+              className="btn primary"
+              type="button"
+              disabled={selectedIds.length !== 2}
+              onClick={handleCompareClick}
+              style={{
+                minHeight: 32,
+                padding: '4px 16px',
+                fontWeight: 600,
+                opacity: selectedIds.length === 2 ? 1 : 0.5,
+              }}
+              title={selectedIds.length === 2 ? 'Navigate to comparison analysis' : 'Select exactly 2 experiments to compare'}
+            >
+              Compare Experiments
+              <ArrowRightIcon />
+            </button>
+          </div>
+        </div>
+
+        {selectionWarning && (
+          <div
+            style={{
+              marginTop: 12,
+              padding: '6px 10px',
+              border: '1px solid #D5A45D',
+              background: '#242017',
+              fontSize: 12,
+              color: '#F3EDE4',
+            }}
+            role="status"
+          >
+            {selectionWarning}
+          </div>
+        )}
+      </section>
+
+      {/* Filter and Search Bar */}
+      <div
+        className="panel"
+        style={{
+          marginBottom: 16,
+          padding: '10px 14px',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          flexWrap: 'wrap',
+          gap: 12,
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <label htmlFor="search-input" className="mono" style={{ fontSize: 11, color: 'var(--color-text-secondary)' }}>
+            FILTER:
+          </label>
+          <input
+            id="search-input"
+            type="text"
+            placeholder="Search run ID or protocol..."
+            value={searchQuery}
+            onChange={e => setSearchQuery(e.target.value)}
+            style={{
+              width: 220,
+              minHeight: 30,
+              padding: '4px 8px',
+              fontSize: 12,
+              background: 'var(--color-input)',
+              border: '1px solid var(--color-border)',
+              color: 'var(--color-text-primary)',
+            }}
+          />
+
+          <span className="muted" style={{ margin: '0 4px' }}>|</span>
+
+          <span className="mono" style={{ fontSize: 11, color: 'var(--color-text-secondary)' }}>
+            PROTOCOL:
+          </span>
+          {(['ALL', 'PURE_ALOHA', 'SLOTTED_ALOHA', 'CSMA', 'CSMA_CD'] as const).map(p => (
+            <button
+              key={p}
+              type="button"
+              className="btn"
+              onClick={() => setProtocolFilter(p)}
+              style={{
+                minHeight: 28,
+                padding: '2px 8px',
+                fontSize: 11,
+                borderColor: protocolFilter === p ? 'var(--color-accent)' : 'var(--color-border)',
+                background: protocolFilter === p ? 'var(--color-surface-raised)' : 'transparent',
+                color: protocolFilter === p ? 'var(--color-accent)' : 'var(--color-text-secondary)',
+              }}
+            >
+              {p === 'ALL' ? 'All' : formatProtocol(p)}
+            </button>
+          ))}
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <label htmlFor="sort-field" className="mono" style={{ fontSize: 11, color: 'var(--color-text-secondary)' }}>
+            SORT:
+          </label>
+          <select
+            id="sort-field"
+            value={sortField}
+            onChange={e => setSortField(e.target.value as SortField)}
+            style={{ minHeight: 30, padding: '2px 8px', fontSize: 12 }}
+          >
+            <option value="date">Date Created</option>
+            <option value="throughput">Throughput (bps)</option>
+            <option value="collisions">Collisions</option>
+            <option value="stations">Stations</option>
+            <option value="duration">Duration</option>
+          </select>
+          <button
+            type="button"
+            className="btn"
+            onClick={() => setSortOrder(curr => (curr === 'asc' ? 'desc' : 'asc'))}
+            style={{ minHeight: 30, padding: '2px 8px', fontSize: 11 }}
+            title="Toggle sort direction"
+          >
+            {sortOrder === 'asc' ? '▲ ASC' : '▼ DESC'}
+          </button>
+        </div>
+      </div>
+
+      {/* Experiment Selection Table */}
       {loading ? (
         <div className="panel" style={{ padding: 24, textAlign: 'center' }}>
-          <p className="muted">Loading simulation comparison data...</p>
+          <p className="muted">Loading simulation experiments...</p>
         </div>
       ) : runs.length === 0 ? (
         <div className="empty-state">
-          <h2>No Experiments to Compare</h2>
+          <h2>No Simulation Experiments Found</h2>
           <p>
-            Configure at least two simulations or run a parameter sweep benchmark to perform comparative analysis.
+            Run a parameter sweep benchmark or configure simulations to populate the comparison workspace.
           </p>
           <div className="button-row" style={{ justifyContent: 'center', marginTop: 12 }}>
             <button
@@ -337,355 +475,119 @@ export default function Comparisons() {
           </div>
         </div>
       ) : (
-        <>
-          {/* Saved Experiments Selection Table */}
-          <section className="panel" aria-labelledby="select-runs-heading" style={{ marginBottom: 20 }}>
-            <div className="table-toolbar">
-              <div>
-                <h2 id="select-runs-heading" style={{ fontSize: 16, margin: 0 }}>
-                  Select Experiments to Compare
-                </h2>
-                <span className="muted" style={{ fontSize: 12 }}>
-                  Check two or more runs to plot side-by-side performance metrics.
-                </span>
-              </div>
-              <span className="mono" style={{ fontSize: 12, color: '#DDB487' }}>
-                {selectedRuns.length} selected
+        <section className="panel" aria-labelledby="select-runs-heading">
+          <div className="table-toolbar">
+            <div>
+              <h2 id="select-runs-heading" style={{ fontSize: 15, margin: 0 }}>
+                Eligible Simulation Experiments ({filteredRuns.length})
+              </h2>
+              <span className="muted" style={{ fontSize: 12 }}>
+                Check exactly two experiments to enable the comparison analysis.
               </span>
             </div>
+            <span className="mono" style={{ fontSize: 12, color: '#DDB487' }}>
+              {selectedIds.length} of 2 selected
+            </span>
+          </div>
 
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th scope="col" style={{ width: 44 }}>Select</th>
-                    <th scope="col">Protocol</th>
-                    <th scope="col">Stations</th>
-                    <th scope="col">Frame Size</th>
-                    <th scope="col">Data Rate</th>
-                    <th scope="col">Duration</th>
-                    <th scope="col">Intensity</th>
-                    <th scope="col">Throughput</th>
-                    <th scope="col">Collisions</th>
-                    <th scope="col">Run ID</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {runs.map(run => {
-                    const isChecked = selectedIds.includes(run.id);
-                    return (
-                      <tr key={run.id} style={{ background: isChecked ? '#252626' : undefined }}>
-                        <td>
-                          <input
-                            type="checkbox"
-                            checked={isChecked}
-                            onChange={() => toggleRun(run.id)}
-                            aria-label={`Select ${formatProtocol(run.config.protocol)} run ${run.id}`}
-                          />
-                        </td>
-                        <td>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col" style={{ width: 44, textAlign: 'center' }}>Select</th>
+                  <th scope="col">Protocol</th>
+                  <th scope="col" className="numeric-cell">Stations</th>
+                  <th scope="col" className="numeric-cell">Frame Size</th>
+                  <th scope="col" className="numeric-cell">Data Rate</th>
+                  <th scope="col" className="numeric-cell">Duration</th>
+                  <th scope="col" className="numeric-cell">Intensity</th>
+                  <th scope="col" className="numeric-cell">Throughput</th>
+                  <th scope="col" className="numeric-cell">Collisions</th>
+                  <th scope="col">Run ID</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredRuns.map(run => {
+                  const isChecked = selectedIds.includes(run.id);
+                  const isA = selectedIds[0] === run.id;
+                  const isB = selectedIds[1] === run.id;
+
+                  return (
+                    <tr
+                      key={run.id}
+                      style={{
+                        background: isChecked ? 'var(--color-surface-raised)' : undefined,
+                        borderLeft: isChecked
+                          ? `3px solid ${isA ? '#78A9E8' : '#78B978'}`
+                          : undefined,
+                      }}
+                    >
+                      <td style={{ textAlign: 'center' }}>
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          onChange={() => toggleRun(run.id)}
+                          aria-label={`Select ${formatProtocol(run.config.protocol)} run ${run.id}`}
+                        />
+                      </td>
+                      <td>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                           <strong style={{ color: protocolColors[run.config.protocol] }}>
                             {formatProtocol(run.config.protocol)}
                           </strong>
-                        </td>
-                        <td className="numeric-cell">{run.config.stationCount}</td>
-                        <td className="numeric-cell">{run.config.frameSizeBytes} B</td>
-                        <td className="numeric-cell">
-                          {(run.config.dataRateBps / 1000).toLocaleString()} kbps
-                        </td>
-                        <td className="numeric-cell">{run.config.durationMs} ms</td>
-                        <td className="numeric-cell">{run.config.trafficIntensity}</td>
-                        <td className="numeric-cell mono">
-                          {formatNumber(run.metrics.throughputBps, 1)} bps
-                        </td>
-                        <td className="numeric-cell">{formatNumber(run.metrics.collisions)}</td>
-                        <td className="mono" style={{ fontSize: 11 }}>
-                          <Link to={`/simulations/${run.id}`}>{run.id.slice(0, 8)}</Link>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </section>
-
-          {/* Comparability Notice */}
-          {selectedRuns.length >= 2 && (
-            <div
-              className={isFair ? 'comparison-fair-note' : 'comparison-caution-note'}
-              role={isFair ? 'status' : 'alert'}
-              style={{ marginBottom: 20 }}
-            >
-              {isFair ? (
-                <>
-                  <strong style={{ color: '#78B978' }}>Controlled Experiment:</strong> All {selectedRuns.length} selected runs share identical station count, frame size, data rate, duration, traffic model, intensity, and random seed.
-                </>
-              ) : (
-                <>
-                  <strong style={{ color: '#D5A45D' }}>Varying Parameters Detected:</strong> Experiments differ in: {differences.join(', ')}. Differences in measured output cannot be attributed solely to protocol rules.
-                </>
-              )}
-            </div>
-          )}
-
-          {selectedRuns.length < 2 ? (
-            <div className="empty-state">
-              <h3>Select At Least Two Experiments</h3>
-              <p>Choose two or more simulation runs in the table above to view comparative charts and insights.</p>
-            </div>
-          ) : (
-            <>
-              {/* Metric Selector Tabs */}
-              <div className="metric-selector-bar" role="tablist" aria-label="Select comparison metric">
-                {metricsList.map(m => (
-                  <button
-                    key={m.key}
-                    type="button"
-                    role="tab"
-                    aria-selected={activeMetricKey === m.key}
-                    className={`metric-tab${activeMetricKey === m.key ? ' active' : ''}`}
-                    onClick={() => setActiveMetricKey(m.key)}
-                  >
-                    {m.label} ({m.unit})
-                  </button>
-                ))}
-              </div>
-
-              {/* Main SVG Comparison Chart */}
-              <section className="panel chart-panel" aria-labelledby="chart-heading" style={{ marginBottom: 20 }}>
-                <div className="chart-header">
-                  <div>
-                    <h2 id="chart-heading" style={{ fontSize: 16, margin: 0 }}>
-                      {activeMetricMeta.label} by Protocol
-                    </h2>
-                    <span className="muted" style={{ fontSize: 12 }}>
-                      Measured values in {activeMetricMeta.unit} across selected simulation runs
-                    </span>
-                  </div>
-
-                  {/* Legend */}
-                  <div className="chart-legend" aria-hidden="true">
-                    {selectedRuns.map(r => (
-                      <span className="legend-item" key={r.id}>
-                        <span
-                          className="legend-color"
-                          style={{ background: protocolColors[r.config.protocol] }}
-                        />
-                        {formatProtocol(r.config.protocol)} ({r.id.slice(0, 6)})
-                      </span>
-                    ))}
-                  </div>
-                </div>
-
-                {/* SVG Technical Bar Chart */}
-                <div className="svg-chart-container" tabIndex={0} aria-label={`${activeMetricMeta.label} comparison chart`}>
-                  <svg
-                    viewBox={`0 0 820 ${80 + selectedRuns.length * 36}`}
-                    width="100%"
-                    height={80 + selectedRuns.length * 36}
-                    style={{ display: 'block', background: '#191A1A' }}
-                    aria-hidden="true"
-                  >
-                    {/* Ticks & Gridlines */}
-                    {[0, 0.25, 0.5, 0.75, 1].map(ratio => {
-                      const x = 160 + ratio * chartTrackWidth;
-                      const tickVal = maxChartValue * ratio;
-                      return (
-                        <g key={ratio}>
-                          <line x1={x} y1="25" x2={x} y2={45 + selectedRuns.length * 36} stroke="#252626" strokeWidth="1" />
-                          <text x={x} y="18" fill="#928A7F" fontSize="9" fontFamily="IBM Plex Mono" textAnchor="middle">
-                            {formatNumber(tickVal, activeMetricMeta.fractionDigits)}
-                          </text>
-                        </g>
-                      );
-                    })}
-
-                    {/* Bars */}
-                    {selectedRuns.map((run, idx) => {
-                      let raw = run.metrics[activeMetricKey] as number | undefined;
-                      if (activeMetricKey === 'channelUtilization' && raw !== undefined) {
-                        raw = raw * 100;
-                      }
-                      const val = raw ?? 0;
-                      const width = maxChartValue > 0 ? (val / maxChartValue) * chartTrackWidth : 0;
-                      const y = 32 + idx * 36;
-                      const color = protocolColors[run.config.protocol];
-
-                      return (
-                        <g key={run.id}>
-                          {/* Protocol Label */}
-                          <text
-                            x="150"
-                            y={y + 16}
-                            fill="#F3EDE4"
-                            fontSize="11"
-                            fontFamily="IBM Plex Mono"
-                            textAnchor="end"
-                          >
-                            {formatProtocol(run.config.protocol)}
-                          </text>
-
-                          {/* Track */}
-                          <line x1="160" y1={y + 11} x2={160 + chartTrackWidth} y2={y + 11} stroke="#403C36" strokeWidth="1" />
-
-                          {/* Data Bar */}
-                          <rect
-                            x="160"
-                            y={y + 2}
-                            width={Math.max(2, width)}
-                            height="18"
-                            fill={color}
-                            stroke="#141515"
-                            strokeWidth="0.5"
-                          />
-
-                          {/* Value Label */}
-                          <text
-                            x={168 + Math.max(2, width)}
-                            y={y + 15}
-                            fill="#F3EDE4"
-                            fontSize="10"
-                            fontFamily="IBM Plex Mono"
-                          >
-                            {formatNumber(val, activeMetricMeta.fractionDigits)} {activeMetricMeta.unit}
-                          </text>
-                        </g>
-                      );
-                    })}
-                  </svg>
-                </div>
-              </section>
-
-              {/* Key Insight Panel */}
-              <section className="panel key-insight-panel" aria-labelledby="insight-heading" style={{ marginBottom: 20 }}>
-                <div className="insight-header">
-                  <h2 id="insight-heading" style={{ fontSize: 15, margin: 0, color: '#DDB487' }}>
-                    Key Simulation Insight
-                  </h2>
-                  <span className="mono" style={{ fontSize: 11, color: '#928A7F' }}>
-                    DATA-DRIVEN FACTUAL DEDUCTION
-                  </span>
-                </div>
-                <p className="insight-text">{keyInsight}</p>
-              </section>
-
-              {/* Results Summary Table */}
-              <section className="panel" aria-labelledby="results-summary-heading">
-                <h2 id="results-summary-heading" style={{ fontSize: 16, marginBottom: 12 }}>
-                  Comparative Experiment Metrics
-                </h2>
-
-                <div className="table-wrap">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th scope="col">Parameter / Metric</th>
-                        {selectedRuns.map(run => (
-                          <th scope="col" key={run.id} style={{ color: protocolColors[run.config.protocol] }}>
-                            {formatProtocol(run.config.protocol)}
-                            <br />
-                            <span className="mono" style={{ fontSize: 10, color: '#928A7F' }}>
-                              ({run.id.slice(0, 6)})
+                          {isA && (
+                            <span
+                              className="mono"
+                              style={{
+                                fontSize: 10,
+                                background: '#78A9E8',
+                                color: '#141515',
+                                padding: '1px 4px',
+                                fontWeight: 700,
+                              }}
+                            >
+                              EXP A
                             </span>
-                          </th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <tr>
-                        <th scope="row">Station Count</th>
-                        {selectedRuns.map(r => (
-                          <td className="numeric-cell" key={r.id}>{r.config.stationCount}</td>
-                        ))}
-                      </tr>
-                      <tr>
-                        <th scope="row">Frame Size</th>
-                        {selectedRuns.map(r => (
-                          <td className="numeric-cell" key={r.id}>{r.config.frameSizeBytes} bytes</td>
-                        ))}
-                      </tr>
-                      <tr>
-                        <th scope="row">Data Rate</th>
-                        {selectedRuns.map(r => (
-                          <td className="numeric-cell" key={r.id}>{(r.config.dataRateBps / 1000).toLocaleString()} kbps</td>
-                        ))}
-                      </tr>
-                      <tr>
-                        <th scope="row">Duration</th>
-                        {selectedRuns.map(r => (
-                          <td className="numeric-cell" key={r.id}>{r.config.durationMs} ms</td>
-                        ))}
-                      </tr>
-                      <tr>
-                        <th scope="row">Traffic Intensity G</th>
-                        {selectedRuns.map(r => (
-                          <td className="numeric-cell" key={r.id}>{r.config.trafficIntensity}</td>
-                        ))}
-                      </tr>
-                      <tr>
-                        <th scope="row">Random Seed</th>
-                        {selectedRuns.map(r => (
-                          <td className="numeric-cell mono" key={r.id}>{r.config.randomSeed ?? 'Not recorded'}</td>
-                        ))}
-                      </tr>
-                      <tr style={{ background: '#252626' }}>
-                        <th scope="row">Delivered Frames</th>
-                        {selectedRuns.map(r => (
-                          <td className="numeric-cell mono" key={r.id} style={{ color: '#78B978' }}>
-                            {formatNumber(r.metrics.successfulFrames)}
-                          </td>
-                        ))}
-                      </tr>
-                      <tr style={{ background: '#252626' }}>
-                        <th scope="row">Collision Incidents</th>
-                        {selectedRuns.map(r => (
-                          <td className="numeric-cell mono" key={r.id} style={{ color: '#D96A62' }}>
-                            {formatNumber(r.metrics.collisions)}
-                          </td>
-                        ))}
-                      </tr>
-                      <tr style={{ background: '#252626' }}>
-                        <th scope="row">Retransmissions</th>
-                        {selectedRuns.map(r => (
-                          <td className="numeric-cell mono" key={r.id} style={{ color: '#D5A45D' }}>
-                            {formatNumber(r.metrics.retransmissions)}
-                          </td>
-                        ))}
-                      </tr>
-                      <tr style={{ background: '#252626' }}>
-                        <th scope="row">Throughput (bps)</th>
-                        {selectedRuns.map(r => (
-                          <td className="numeric-cell mono" key={r.id} style={{ color: '#DDB487', fontWeight: 600 }}>
-                            {formatNumber(r.metrics.throughputBps, 1)}
-                          </td>
-                        ))}
-                      </tr>
-                      <tr style={{ background: '#252626' }}>
-                        <th scope="row">Channel Utilization (%)</th>
-                        {selectedRuns.map(r => (
-                          <td className="numeric-cell mono" key={r.id}>
-                            {r.metrics.channelUtilization !== undefined
-                              ? `${formatNumber(r.metrics.channelUtilization * 100, 1)}%`
-                              : 'Not available'}
-                          </td>
-                        ))}
-                      </tr>
-                      <tr style={{ background: '#252626' }}>
-                        <th scope="row">Average Delay (ms)</th>
-                        {selectedRuns.map(r => (
-                          <td className="numeric-cell mono" key={r.id}>
-                            {formatNumber(r.metrics.averageDelayMs, 2)}
-                          </td>
-                        ))}
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-              </section>
-            </>
-          )}
-        </>
+                          )}
+                          {isB && (
+                            <span
+                              className="mono"
+                              style={{
+                                fontSize: 10,
+                                background: '#78B978',
+                                color: '#141515',
+                                padding: '1px 4px',
+                                fontWeight: 700,
+                              }}
+                            >
+                              EXP B
+                            </span>
+                          )}
+                        </div>
+                      </td>
+                      <td className="numeric-cell">{run.config.stationCount}</td>
+                      <td className="numeric-cell">{run.config.frameSizeBytes} B</td>
+                      <td className="numeric-cell">
+                        {(run.config.dataRateBps / 1000).toLocaleString()} kbps
+                      </td>
+                      <td className="numeric-cell">{run.config.durationMs} ms</td>
+                      <td className="numeric-cell">{run.config.trafficIntensity}</td>
+                      <td className="numeric-cell mono">
+                        {formatNumber(run.metrics.throughputBps, 1)} bps
+                      </td>
+                      <td className="numeric-cell">{formatNumber(run.metrics.collisions)}</td>
+                      <td className="mono" style={{ fontSize: 11 }}>
+                        <Link to={`/simulations/${run.id}`} title="Inspect simulation workspace">
+                          {run.id.slice(0, 8)}
+                        </Link>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </section>
       )}
     </div>
   );

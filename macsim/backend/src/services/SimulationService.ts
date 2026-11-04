@@ -114,11 +114,11 @@ export class SimulationService {
       return engine.toModel();
     }
 
-    // Interactive animated real-time ticker loop (40ms ticks)
+    // Interactive animated real-time ticker loop (60ms ticks)
     let speed = 1.0;
-    const tickIntervalMs = 40;
-    // Step roughly (sim_time / 100 ticks) per tick at 1x
-    const stepDeltaUs = Math.max(5000, engine.config.simulation_time_us / 100);
+    const tickIntervalMs = 60;
+    // Step calibrated per tick at 1x for smooth, observable discrete-event animation
+    const stepDeltaUs = Math.max(500, Math.min(2500, engine.config.simulation_time_us / 400));
 
     const timer = setInterval(async () => {
       const runner = this.activeRunners.get(id);
@@ -172,12 +172,13 @@ export class SimulationService {
     engine.resume();
     this.broadcastCurrentSnapshot(id, engine);
 
-    const tickIntervalMs = 40;
-    const stepDeltaUs = Math.max(5000, engine.config.simulation_time_us / 100);
+    const prevSpeed = this.activeRunners.get(id)?.speed ?? 1.0;
+    const tickIntervalMs = 60;
+    const stepDeltaUs = Math.max(500, Math.min(2500, engine.config.simulation_time_us / 400));
 
     const timer = setInterval(async () => {
       const runner = this.activeRunners.get(id);
-      const currentSpeed = runner ? runner.speed : 1.0;
+      const currentSpeed = runner ? runner.speed : prevSpeed;
 
       const targetUs = engine.clock.currentTime + stepDeltaUs * currentSpeed;
       engine.runUntil(targetUs);
@@ -193,7 +194,7 @@ export class SimulationService {
       }
     }, tickIntervalMs);
 
-    this.activeRunners.set(id, { timer, speed: 1.0 });
+    this.activeRunners.set(id, { timer, speed: prevSpeed });
 
     return engine.toModel();
   }

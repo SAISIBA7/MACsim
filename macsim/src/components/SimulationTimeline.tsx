@@ -26,9 +26,7 @@ export function SimulationTimeline({
   stationIds,
 }: TimelineProps) {
   const [showTable, setShowTable] = useState(false);
-
-  // Filter state for each activity type (toggleable by clicking legend items)
-  const [activeFilters, setActiveFilters] = useState<Record<TimelineInterval['type'], boolean>>({
+  const [filterTypes, setFilterTypes] = useState<Record<TimelineInterval['type'], boolean>>({
     TRANSMISSION: true,
     COLLISION: true,
     DELIVERY: true,
@@ -36,256 +34,264 @@ export function SimulationTimeline({
   });
 
   const toggleFilter = (type: TimelineInterval['type']) => {
-    setActiveFilters((prev) => ({
-      ...prev,
-      [type]: !prev[type],
-    }));
+    setFilterTypes(curr => ({ ...curr, [type]: !curr[type] }));
   };
 
-  // Derive timeline intervals from chronological events
-  const intervals = useMemo(() => {
-    const list: TimelineInterval[] = [];
-    const frameToStation = new Map<string, string>();
-    // Track open transmissions per station: stationId -> { startMs, frameId, durationMs }
-    const openTx = new Map<string, { startMs: number; frameId?: string; durationMs: number }>();
-    // Track open backoffs per station: stationId -> { startMs, expectedEndMs, frameId, message }
-    const openBackoff = new Map<string, { startMs: number; expectedEndMs: number; frameId?: string; message: string }>();
-
-    for (const ev of events) {
-      const rawType = (ev.eventType || (ev as unknown as Record<string, unknown>).event_type || '') as string;
-      const eventType = rawType.toUpperCase().replace(/[\s-]/g, '_');
-      const timeMs = ev.simulationTimeMs ?? (ev.timestamp ? ev.timestamp / 1000 : 0);
-      const rawSid =
-        (ev.stationIds && ev.stationIds[0]) ||
-        ((ev as unknown as Record<string, unknown>).station_id as string) ||
-        ((ev.payload as unknown as Record<string, unknown>)?.stationId as string);
-      const frameId =
-        ev.frameId ||
-        ((ev as unknown as Record<string, unknown>).frame_id as string) ||
-        ((ev.payload as unknown as Record<string, unknown>)?.frameId as string);
-      const payload = (ev.payload || (ev as unknown as Record<string, unknown>).details || {}) as unknown as Record<string, unknown>;
-
-      // Track frame-to-station mapping
-      if (rawSid && !rawSid.startsWith('frame_') && frameId) {
-        frameToStation.set(frameId, rawSid);
-      }
-      const sid = (rawSid && !rawSid.startsWith('frame_')) ? rawSid : (frameId ? frameToStation.get(frameId) : undefined);
-
-      if (eventType === 'TRANSMISSION_STARTED' || eventType === 'RETRANSMISSION_ATTEMPTED') {
-        if (sid) {
-          const durationMsEst = Number(payload.durationUs ? Number(payload.durationUs) / 1000 : (payload.durationMs ?? 8.192));
-          openTx.set(sid, { startMs: timeMs, frameId, durationMs: durationMsEst });
-        }
-      } else if (eventType === 'TRANSMISSION_COMPLETED' || eventType === 'FRAME_DELIVERED') {
-        if (sid) {
-          const started = openTx.get(sid);
-          const startMs = started ? started.startMs : Math.max(0, timeMs - 8.192);
-          const endMs = Math.max(timeMs, startMs + 0.1);
-          const span = endMs - startMs;
-          const splitMs = startMs + span * 0.55;
-
-          // 1. Transmitting interval (Blue)
-          list.push({
-            id: `tx-${ev.eventId || ev.id || `${sid}-${startMs}`}`,
-            stationId: sid,
-            type: 'TRANSMISSION',
-            startMs,
-            endMs: splitMs,
-            frameId: frameId || started?.frameId,
-            message: `${sid} transmitting ${frameId || started?.frameId || 'frame'}`,
-          });
-
-          // 2. Delivered interval (Green)
-          list.push({
-            id: `del-${ev.eventId || ev.id || `${sid}-${endMs}`}`,
-            stationId: sid,
-            type: 'DELIVERY',
-            startMs: splitMs,
-            endMs,
-            frameId: frameId || started?.frameId,
-            message: ev.message || `${sid} delivered ${frameId || started?.frameId || 'frame'} successfully`,
-          });
-
-          openTx.delete(sid);
-        }
-      } else if (eventType === 'COLLISION_DETECTED') {
-        const affected = new Set<string>();
-        if (sid) affected.add(sid);
-
-        // Safely resolve colliding station IDs from payload
-        if (Array.isArray(payload.collidedWith)) {
-          for (const item of payload.collidedWith) {
-            if (typeof item === 'string') {
-              if (item.startsWith('frame_')) {
-                const s = frameToStation.get(item);
-                if (s) affected.add(s);
-              } else if (!item.startsWith('frame_')) {
-                affected.add(item);
-              }
-            }
-          }
-        } else if (typeof payload.collidedWith === 'string') {
-          for (const item of payload.collidedWith.split(/\s+/)) {
-            if (item.startsWith('frame_')) {
-              const s = frameToStation.get(item);
-              if (s) affected.add(s);
-            } else if (item && !item.startsWith('frame_')) {
-              affected.add(item);
-            }
-          }
-        }
-
-        for (const st of affected) {
-          const started = openTx.get(st);
-          const startMs = started ? started.startMs : Math.max(0, timeMs - 8.192);
-          const endMs = Math.max(timeMs, startMs + 1);
-
-          // Transmission phase before collision occurred
-          if (timeMs > startMs + 0.5) {
-            list.push({
-              id: `tx-col-${ev.eventId || startMs}-${st}`,
-              stationId: st,
-              type: 'TRANSMISSION',
-              startMs,
-              endMs: timeMs,
-              frameId: started?.frameId || frameId,
-              message: `${st} transmitted ${started?.frameId || frameId || 'frame'} before collision`,
-            });
-          }
-
-          // Collision interval
-          list.push({
-            id: `col-${ev.eventId || ev.id || `${st}-${timeMs}`}-${st}`,
-            stationId: st,
-            type: 'COLLISION',
-            startMs: timeMs,
-            endMs: endMs + 2,
-            frameId: started?.frameId || frameId,
-            message: ev.message || `Collision detected on ${st} (${frameId || started?.frameId || 'frame'})`,
-          });
-          openTx.delete(st);
-        }
-      } else if (eventType === 'BACKOFF_STARTED') {
-        if (sid) {
-          const delayMs = Number(
-            payload.delayMs ?? (payload.delayUs ? Number(payload.delayUs) / 1000 : 8.192),
-          );
-          openBackoff.set(sid, {
-            startMs: timeMs,
-            expectedEndMs: timeMs + Math.max(0.5, delayMs),
-            frameId,
-            message: ev.message || `${sid} entered backoff for ${delayMs.toFixed(1)}ms`,
-          });
-        }
-      } else if (eventType === 'BACKOFF_COMPLETED') {
-        if (sid) {
-          const b = openBackoff.get(sid);
-          const startMs = b ? b.startMs : Math.max(0, timeMs - 8.192);
-          const endMs = Math.max(timeMs, startMs + 0.5);
-
-          list.push({
-            id: `bo-${ev.eventId || ev.id || `${sid}-${timeMs}`}`,
-            stationId: sid,
-            type: 'BACKOFF',
-            startMs,
-            endMs,
-            frameId: frameId || b?.frameId,
-            message: b?.message || `${sid} completed backoff delay (${(endMs - startMs).toFixed(1)}ms)`,
-          });
-          openBackoff.delete(sid);
-        }
-      }
-    }
-
-    // Add any ongoing/unclosed backoffs
-    for (const [sid, b] of openBackoff.entries()) {
-      list.push({
-        id: `ongoing-bo-${sid}-${b.startMs}`,
-        stationId: sid,
-        type: 'BACKOFF',
-        startMs: b.startMs,
-        endMs: Math.min(durationMs, Math.max(b.startMs + 0.5, b.expectedEndMs)),
-        frameId: b.frameId,
-        message: b.message,
-      });
-    }
-
-    // Add any ongoing active transmissions up to currentTimeMs
-    for (const [sid, info] of openTx.entries()) {
-      list.push({
-        id: `ongoing-tx-${sid}-${info.startMs}`,
-        stationId: sid,
-        type: 'TRANSMISSION',
-        startMs: info.startMs,
-        endMs: Math.min(durationMs, Math.max(info.startMs + 0.1, currentTimeMs)),
-        frameId: info.frameId,
-        message: `${sid} transmitting ${info.frameId ?? ''}`,
-      });
-    }
-
-    return list.sort((a, b) => a.startMs - b.startMs);
-  }, [events, durationMs, currentTimeMs]);
-
-  // Clean station list strictly (stations only, never frames)
+  // 3.1 Station-Only Lane Architecture
   const visibleStations = useMemo(() => {
     const raw = stationIds && stationIds.length > 0 ? stationIds : [];
-    const validProps = raw.filter((s) => typeof s === 'string' && !s.startsWith('frame_'));
-    if (validProps.length > 0) return validProps;
+    const validProps = raw.filter(s => typeof s === 'string' && !s.startsWith('frame_'));
+    if (validProps.length > 0) return validProps.slice(0, 8);
 
     const set = new Set<string>();
     for (const ev of events) {
       if (ev.stationIds) {
         for (const sid of ev.stationIds) {
-          if (sid && !sid.startsWith('frame_')) set.add(sid);
+          if (sid && typeof sid === 'string' && !sid.startsWith('frame_')) set.add(sid);
         }
       }
       const rawSid = (ev as unknown as Record<string, unknown>).station_id as string;
-      if (rawSid && !rawSid.startsWith('frame_')) set.add(rawSid);
+      if (rawSid && typeof rawSid === 'string' && !rawSid.startsWith('frame_')) set.add(rawSid);
     }
     const arr = Array.from(set).sort();
-    return arr.length > 0 ? arr : ['station_1', 'station_2', 'station_3', 'station_4'];
+    return arr.length > 0 ? arr.slice(0, 8) : ['station_1', 'station_2', 'station_3', 'station_4'];
   }, [stationIds, events]);
+
+  // 3.3 Event Interval Resolution Engine
+  const intervals = useMemo(() => {
+    const list: TimelineInterval[] = [];
+
+    // Frame ID -> Station ID resolution map
+    const frameToStation = new Map<string, string>();
+    for (const ev of events) {
+      const sid = ev.stationIds?.find(s => typeof s === 'string' && !s.startsWith('frame_'));
+      if (ev.frameId && sid) {
+        frameToStation.set(ev.frameId, sid);
+      }
+    }
+
+    // Track open transmissions: stationId -> { startMs, frameId, durationMs }
+    const openTx = new Map<string, { startMs: number; frameId?: string; durationMs?: number }>();
+    // Track open backoffs: stationId -> { startMs, expectedEndMs, frameId, message }
+    const openBackoff = new Map<string, { startMs: number; expectedEndMs: number; frameId?: string; message: string }>();
+
+    for (const ev of events) {
+      const rawType = ev.eventType || (ev as unknown as Record<string, unknown>).event_type || '';
+      const typeStr = String(rawType).trim().toUpperCase().replace(/\s+/g, '_');
+
+      const isTxStart =
+        typeStr === 'TRANSMISSION_STARTED' ||
+        typeStr === 'RETRANSMISSION_ATTEMPTED';
+
+      const isDelivered =
+        typeStr === 'TRANSMISSION_COMPLETED' ||
+        typeStr === 'FRAME_DELIVERED' ||
+        typeStr === 'FRAME_TRANSMITTED' ||
+        typeStr === 'SUCCESSFUL';
+
+      const isCollision =
+        typeStr === 'COLLISION_DETECTED' ||
+        typeStr === 'COLLISION';
+
+      const isBackoffStart =
+        typeStr === 'BACKOFF_STARTED';
+
+      const isBackoffEnd =
+        typeStr === 'BACKOFF_COMPLETED' ||
+        typeStr === 'BACKOFF_END';
+
+      // Resolve primary station
+      let sid = ev.stationIds?.find(s => typeof s === 'string' && !s.startsWith('frame_'));
+      if (!sid && ev.frameId) {
+        sid = frameToStation.get(ev.frameId);
+      }
+
+      if (isTxStart && sid) {
+        const p = (ev.payload || (ev as unknown as Record<string, unknown>).details || {}) as Record<string, unknown>;
+        const durationMs = typeof p.durationUs === 'number'
+          ? p.durationUs / 1000
+          : typeof p.durationMs === 'number'
+            ? p.durationMs
+            : 8.192;
+        openTx.set(sid, { startMs: ev.simulationTimeMs, frameId: ev.frameId || undefined, durationMs });
+      } else if (isDelivered && sid) {
+        const started = openTx.get(sid);
+        const dur = started?.durationMs ?? 8.192;
+        const startMs = started ? started.startMs : Math.max(0, ev.simulationTimeMs - dur);
+        const endMs = ev.simulationTimeMs;
+        const frameId = ev.frameId || started?.frameId;
+
+        // 1. Physical channel transmission interval (transit airtime)
+        list.push({
+          id: `${ev.eventId || ev.id || 'tx'}-${sid}-tx`,
+          stationId: sid,
+          type: 'TRANSMISSION',
+          startMs,
+          endMs,
+          frameId,
+          message: ev.message || `${sid} transmitted frame ${frameId ?? ''}`,
+        });
+
+        // 2. Verified clean frame delivery endpoint
+        list.push({
+          id: `${ev.eventId || ev.id || 'del'}-${sid}-del`,
+          stationId: sid,
+          type: 'DELIVERY',
+          startMs,
+          endMs,
+          frameId,
+          message: ev.message || `${sid} successfully delivered frame ${frameId ?? ''}`,
+        });
+
+        openTx.delete(sid);
+      } else if (isCollision) {
+        // Collect all colliding stations
+        const colliding = new Set<string>();
+        if (ev.stationIds) {
+          for (const s of ev.stationIds) {
+            if (typeof s === 'string' && !s.startsWith('frame_')) colliding.add(s);
+          }
+        }
+        // Check payload for frame references or station references
+        if (ev.payload) {
+          const p = ev.payload as Record<string, unknown>;
+          const collidedWith = (p.collidedWith || p.collidingFrames || p.collidingStations) as string[] | undefined;
+          if (Array.isArray(collidedWith)) {
+            for (const item of collidedWith) {
+              if (typeof item === 'string') {
+                const resolved = frameToStation.get(item) || (!item.startsWith('frame_') ? item : undefined);
+                if (resolved) colliding.add(resolved);
+              }
+            }
+          }
+        }
+        if (sid) colliding.add(sid);
+
+        for (const targetSid of colliding) {
+          const started = openTx.get(targetSid);
+          const dur = started?.durationMs ?? 8.192;
+          const txStart = started ? started.startMs : Math.max(0, ev.simulationTimeMs - dur);
+          const colTime = ev.simulationTimeMs;
+
+          // If station was transmitting cleanly prior to the collision event, record transmission phase
+          if (colTime > txStart + 0.5) {
+            list.push({
+              id: `${ev.eventId || ev.id || 'precol'}-${targetSid}-tx`,
+              stationId: targetSid,
+              type: 'TRANSMISSION',
+              startMs: txStart,
+              endMs: colTime,
+              frameId: ev.frameId || started?.frameId,
+              message: `${targetSid} transmitting prior to collision`,
+            });
+          }
+
+          // Emit collision event interval
+          const colEnd = Math.max(colTime + 2, txStart + dur);
+          list.push({
+            id: `${ev.eventId || ev.id || 'col'}-${targetSid}`,
+            stationId: targetSid,
+            type: 'COLLISION',
+            startMs: colTime > txStart + 0.5 ? colTime : txStart,
+            endMs: Math.min(durationMs, colEnd),
+            frameId: ev.frameId || started?.frameId,
+            message: ev.message || `${targetSid} frame collided on shared medium`,
+          });
+          openTx.delete(targetSid);
+        }
+      } else if (isBackoffStart && sid) {
+        const p = (ev.payload || (ev as unknown as Record<string, unknown>).details || {}) as Record<string, unknown>;
+        const delayEstimate = Number(p.delayMs) || (Number(p.delayUs) ? Number(p.delayUs) / 1000 : 15);
+        openBackoff.set(sid, {
+          startMs: ev.simulationTimeMs,
+          expectedEndMs: Math.min(durationMs, ev.simulationTimeMs + delayEstimate),
+          frameId: ev.frameId || undefined,
+          message: ev.message || `${sid} in backoff (${delayEstimate.toFixed(1)}ms)`,
+        });
+      } else if (isBackoffEnd && sid) {
+        const started = openBackoff.get(sid);
+        const startMs = started ? started.startMs : Math.max(0, ev.simulationTimeMs - 15);
+        list.push({
+          id: `${ev.eventId || ev.id || 'backoff'}-${sid}`,
+          stationId: sid,
+          type: 'BACKOFF',
+          startMs,
+          endMs: ev.simulationTimeMs,
+          frameId: ev.frameId || started?.frameId,
+          message: ev.message || started?.message || `${sid} backoff completed`,
+        });
+        openBackoff.delete(sid);
+      }
+    }
+
+    // Resolve uncompleted open backoffs up to currentTimeMs
+    for (const [s, info] of openBackoff.entries()) {
+      list.push({
+        id: `ongoing-backoff-${s}-${info.startMs}`,
+        stationId: s,
+        type: 'BACKOFF',
+        startMs: info.startMs,
+        endMs: Math.min(info.expectedEndMs, Math.max(info.startMs + 0.1, currentTimeMs)),
+        frameId: info.frameId,
+        message: info.message,
+      });
+    }
+
+    // Resolve uncompleted open transmissions up to currentTimeMs
+    for (const [s, info] of openTx.entries()) {
+      list.push({
+        id: `ongoing-tx-${s}-${info.startMs}`,
+        stationId: s,
+        type: 'TRANSMISSION',
+        startMs: info.startMs,
+        endMs: Math.max(info.startMs + 0.1, currentTimeMs),
+        frameId: info.frameId,
+        message: `${s} transmitting ${info.frameId ?? ''}`,
+      });
+    }
+
+    return list;
+  }, [events, durationMs, currentTimeMs]);
+
+  // Live count per interval type
+  const counts = useMemo(() => {
+    const c = { TRANSMISSION: 0, COLLISION: 0, DELIVERY: 0, BACKOFF: 0 };
+    for (const item of intervals) {
+      c[item.type] = (c[item.type] || 0) + 1;
+    }
+    return c;
+  }, [intervals]);
 
   const effectiveMaxTime = Math.max(durationMs, 10);
   const timeProgress = Math.min(100, (currentTimeMs / effectiveMaxTime) * 100);
 
-  // Time ticks across timeline
+  // Time axis ticks
   const tickCount = 5;
   const ticks = Array.from({ length: tickCount + 1 }, (_, i) => ({
     ratio: i / tickCount,
     timeMs: (effectiveMaxTime * i) / tickCount,
   }));
 
-  // Counts of each activity type
-  const counts = useMemo(() => ({
-    TRANSMISSION: intervals.filter((i) => i.type === 'TRANSMISSION').length,
-    COLLISION: intervals.filter((i) => i.type === 'COLLISION').length,
-    DELIVERY: intervals.filter((i) => i.type === 'DELIVERY').length,
-    BACKOFF: intervals.filter((i) => i.type === 'BACKOFF').length,
-  }), [intervals]);
-
   const colorForType = (type: TimelineInterval['type']) => {
     switch (type) {
       case 'TRANSMISSION':
-        return '#4D9FFF'; // Bright Electric Blue
+        return '#4D9FFF'; // Electric Blue
       case 'COLLISION':
-        return '#FF4D4D'; // Vivid Crimson Red
+        return '#FF4D4D'; // Crimson Red
       case 'DELIVERY':
-        return '#2ECC71'; // Crisp Emerald Green
+        return '#2ECC71'; // Emerald Green
       case 'BACKOFF':
-        return '#E5A93C'; // Subtle Amber Gold
+        return '#E5A93C'; // Translucent Sub-Track
     }
   };
 
   const laneHeight = 32;
-  const topOffset = 30;
+  const topOffset = 28;
   const svgHeight = topOffset + visibleStations.length * laneHeight + 16;
 
-  // Filtered intervals to display based on active legend toggles
-  const filteredIntervals = useMemo(
-    () => intervals.filter((i) => activeFilters[i.type]),
-    [intervals, activeFilters]
-  );
+  const filteredIntervals = useMemo(() => {
+    return intervals.filter(item => filterTypes[item.type]);
+  }, [intervals, filterTypes]);
 
   return (
     <div className="timeline-container">
@@ -301,133 +307,102 @@ export function SimulationTimeline({
             className="btn"
             type="button"
             style={{ fontSize: 12, padding: '3px 8px', minHeight: 28 }}
-            onClick={() => setShowTable((val) => !val)}
+            onClick={() => setShowTable(val => !val)}
           >
             {showTable ? 'View Chart' : 'View Tabular Log'}
           </button>
         </div>
       </div>
 
-      {/* Interactive Legend with toggleable filter pills */}
+      {/* 3.4 Interactive One-Click Legend Filter Pills */}
       <div
         className="timeline-legend"
-        style={{
-          display: 'flex',
-          flexWrap: 'wrap',
-          gap: '8px',
-          alignItems: 'center',
-          padding: '6px 10px',
-          background: '#161717',
-          borderRadius: '6px',
-          border: '1px solid #2B2D2D',
-        }}
+        role="toolbar"
+        aria-label="Toggle timeline event visibility"
+        style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8, margin: '8px 0 12px' }}
       >
-        <span style={{ fontSize: '11px', color: '#928A7F', marginRight: '4px' }}>
+        <span className="legend-label" style={{ fontSize: 11, color: 'var(--color-text-secondary)', marginRight: 4 }}>
           Filters (click to toggle):
         </span>
 
         {/* Transmitting Pill */}
         <button
           type="button"
+          className="btn"
           onClick={() => toggleFilter('TRANSMISSION')}
           style={{
-            background: activeFilters.TRANSMISSION ? 'rgba(77, 159, 255, 0.15)' : '#1F2020',
-            border: `1px solid ${activeFilters.TRANSMISSION ? '#4D9FFF' : '#333'}`,
-            borderRadius: '4px',
-            padding: '3px 9px',
-            cursor: 'pointer',
-            opacity: activeFilters.TRANSMISSION ? 1 : 0.45,
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: '6px',
-            fontSize: '11px',
-            fontFamily: 'IBM Plex Mono, monospace',
-            color: activeFilters.TRANSMISSION ? '#F3EDE4' : '#777',
-            transition: 'all 0.15s ease',
+            minHeight: 26,
+            padding: '2px 8px',
+            fontSize: 11,
+            opacity: filterTypes.TRANSMISSION ? 1 : 0.45,
+            borderColor: filterTypes.TRANSMISSION ? '#4D9FFF' : 'var(--color-border)',
+            background: filterTypes.TRANSMISSION ? 'rgba(77, 159, 255, 0.12)' : 'transparent',
+            color: 'var(--color-text-primary)',
           }}
-          title="Toggle Transmitting intervals on/off"
+          title="Click to toggle Transmitting bars"
         >
-          <span style={{ width: 8, height: 8, borderRadius: 2, background: '#4D9FFF', display: 'inline-block' }} />
-          <span>Transmitting</span>
-          <span style={{ fontSize: '10px', color: '#4D9FFF', fontWeight: 600 }}>({counts.TRANSMISSION})</span>
+          <span style={{ width: 8, height: 8, background: '#4D9FFF', display: 'inline-block', marginRight: 6 }} />
+          Transmitting ({counts.TRANSMISSION})
         </button>
 
         {/* Collision Pill */}
         <button
           type="button"
+          className="btn"
           onClick={() => toggleFilter('COLLISION')}
           style={{
-            background: activeFilters.COLLISION ? 'rgba(255, 77, 77, 0.15)' : '#1F2020',
-            border: `1px solid ${activeFilters.COLLISION ? '#FF4D4D' : '#333'}`,
-            borderRadius: '4px',
-            padding: '3px 9px',
-            cursor: 'pointer',
-            opacity: activeFilters.COLLISION ? 1 : 0.45,
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: '6px',
-            fontSize: '11px',
-            fontFamily: 'IBM Plex Mono, monospace',
-            color: activeFilters.COLLISION ? '#F3EDE4' : '#777',
-            transition: 'all 0.15s ease',
+            minHeight: 26,
+            padding: '2px 8px',
+            fontSize: 11,
+            opacity: filterTypes.COLLISION ? 1 : 0.45,
+            borderColor: filterTypes.COLLISION ? '#FF4D4D' : 'var(--color-border)',
+            background: filterTypes.COLLISION ? 'rgba(255, 77, 77, 0.12)' : 'transparent',
+            color: 'var(--color-text-primary)',
           }}
-          title="Toggle Collision intervals on/off"
+          title="Click to toggle Collision bars"
         >
-          <span style={{ width: 8, height: 8, borderRadius: 2, background: '#FF4D4D', display: 'inline-block' }} />
-          <span>Collision</span>
-          <span style={{ fontSize: '10px', color: '#FF4D4D', fontWeight: 600 }}>({counts.COLLISION})</span>
+          <span style={{ width: 8, height: 8, background: '#FF4D4D', display: 'inline-block', marginRight: 6 }} />
+          Collision ({counts.COLLISION})
         </button>
 
         {/* Delivered Pill */}
         <button
           type="button"
+          className="btn"
           onClick={() => toggleFilter('DELIVERY')}
           style={{
-            background: activeFilters.DELIVERY ? 'rgba(46, 204, 113, 0.15)' : '#1F2020',
-            border: `1px solid ${activeFilters.DELIVERY ? '#2ECC71' : '#333'}`,
-            borderRadius: '4px',
-            padding: '3px 9px',
-            cursor: 'pointer',
-            opacity: activeFilters.DELIVERY ? 1 : 0.45,
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: '6px',
-            fontSize: '11px',
-            fontFamily: 'IBM Plex Mono, monospace',
-            color: activeFilters.DELIVERY ? '#F3EDE4' : '#777',
-            transition: 'all 0.15s ease',
+            minHeight: 26,
+            padding: '2px 8px',
+            fontSize: 11,
+            opacity: filterTypes.DELIVERY ? 1 : 0.45,
+            borderColor: filterTypes.DELIVERY ? '#2ECC71' : 'var(--color-border)',
+            background: filterTypes.DELIVERY ? 'rgba(46, 204, 113, 0.12)' : 'transparent',
+            color: 'var(--color-text-primary)',
           }}
-          title="Toggle Delivered intervals on/off"
+          title="Click to toggle Delivered bars"
         >
-          <span style={{ width: 8, height: 8, borderRadius: 2, background: '#2ECC71', display: 'inline-block' }} />
-          <span>Delivered</span>
-          <span style={{ fontSize: '10px', color: '#2ECC71', fontWeight: 600 }}>({counts.DELIVERY})</span>
+          <span style={{ width: 8, height: 8, background: '#2ECC71', display: 'inline-block', marginRight: 6 }} />
+          Delivered ({counts.DELIVERY})
         </button>
 
-        {/* Backoff Pill (Can be easily toggled off to remove yellow dominance) */}
+        {/* Backoff Sub-Track Pill */}
         <button
           type="button"
+          className="btn"
           onClick={() => toggleFilter('BACKOFF')}
           style={{
-            background: activeFilters.BACKOFF ? 'rgba(229, 169, 60, 0.15)' : '#1F2020',
-            border: `1px solid ${activeFilters.BACKOFF ? '#E5A93C' : '#333'}`,
-            borderRadius: '4px',
-            padding: '3px 9px',
-            cursor: 'pointer',
-            opacity: activeFilters.BACKOFF ? 1 : 0.45,
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: '6px',
-            fontSize: '11px',
-            fontFamily: 'IBM Plex Mono, monospace',
-            color: activeFilters.BACKOFF ? '#F3EDE4' : '#777',
-            transition: 'all 0.15s ease',
+            minHeight: 26,
+            padding: '2px 8px',
+            fontSize: 11,
+            opacity: filterTypes.BACKOFF ? 1 : 0.45,
+            borderColor: filterTypes.BACKOFF ? '#E5A93C' : 'var(--color-border)',
+            background: filterTypes.BACKOFF ? 'rgba(229, 169, 60, 0.12)' : 'transparent',
+            color: 'var(--color-text-primary)',
           }}
-          title="Toggle Backoff intervals on/off"
+          title="Click to toggle Backoff sub-tracks"
         >
-          <span style={{ width: 8, height: 4, borderRadius: 1, background: '#E5A93C', display: 'inline-block' }} />
-          <span>Backoff (Sub-Track)</span>
-          <span style={{ fontSize: '10px', color: '#E5A93C', fontWeight: 600 }}>({counts.BACKOFF})</span>
+          <span style={{ width: 8, height: 4, background: '#E5A93C', display: 'inline-block', marginRight: 6, opacity: 0.7 }} />
+          Backoff (Sub-Track) ({counts.BACKOFF})
         </button>
       </div>
 
@@ -441,37 +416,30 @@ export function SimulationTimeline({
             aria-hidden="true"
           >
             {/* Background gridlines for ticks */}
-            {ticks.map((tick) => {
+            {ticks.map(tick => {
               const x = 70 + tick.ratio * 660;
               return (
                 <g key={tick.timeMs}>
                   <line
                     x1={x}
-                    y1="22"
+                    y1="20"
                     x2={x}
                     y2={topOffset + visibleStations.length * laneHeight}
                     stroke="#262727"
                     strokeWidth="1"
                     strokeDasharray="2,2"
                   />
-                  <text
-                    x={x}
-                    y="16"
-                    fill="#928A7F"
-                    fontSize="9"
-                    fontFamily="IBM Plex Mono"
-                    textAnchor="middle"
-                  >
+                  <text x={x} y="15" fill="#928A7F" fontSize="9" fontFamily="IBM Plex Mono" textAnchor="middle">
                     {formatNumber(tick.timeMs, 0)} ms
                   </text>
                 </g>
               );
             })}
 
-            {/* Time progress bar */}
+            {/* Live Time Progress line */}
             <line
               x1={70 + (timeProgress / 100) * 660}
-              y1="22"
+              y1="20"
               x2={70 + (timeProgress / 100) * 660}
               y2={topOffset + visibleStations.length * laneHeight}
               stroke="#DDB487"
@@ -481,49 +449,23 @@ export function SimulationTimeline({
             {/* Station lanes */}
             {visibleStations.map((sid, idx) => {
               const y = topOffset + idx * laneHeight;
-              const stationIntervals = filteredIntervals.filter((item) => item.stationId === sid);
-
-              // Separate backoff (rendered as sleek background sub-track) from active foreground events
-              const backoffIntervals = stationIntervals.filter((i) => i.type === 'BACKOFF');
-              const activeEvents = stationIntervals.filter((i) => i.type !== 'BACKOFF');
+              const stationIntervals = filteredIntervals.filter(item => item.stationId === sid);
+              const backoffIntervals = stationIntervals.filter(i => i.type === 'BACKOFF');
+              const activeEvents = stationIntervals.filter(i => i.type !== 'BACKOFF');
 
               return (
                 <g key={sid}>
-                  {/* Station label */}
-                  <rect
-                    x="2"
-                    y={y + 3}
-                    width="62"
-                    height="24"
-                    rx="4"
-                    fill="#202222"
-                    stroke="#3E3A34"
-                    strokeWidth="1"
-                  />
-                  <text
-                    x="33"
-                    y={y + 19}
-                    fill="#F3EDE4"
-                    fontSize="10"
-                    fontFamily="IBM Plex Mono"
-                    textAnchor="middle"
-                    fontWeight="500"
-                  >
+                  {/* Station Identifier Label */}
+                  <rect x="2" y={y + 3} width="62" height="24" rx="4" fill="#202222" stroke="#3E3A34" strokeWidth="1" />
+                  <text x="33" y={y + 19} fill="#F3EDE4" fontSize="10" fontFamily="IBM Plex Mono" textAnchor="middle">
                     {sid}
                   </text>
 
-                  {/* Lane track baseline */}
-                  <line
-                    x1="70"
-                    y1={y + 15}
-                    x2="730"
-                    y2={y + 15}
-                    stroke="#2D2B28"
-                    strokeWidth="1"
-                  />
+                  {/* Lane Track Baseline */}
+                  <line x1="70" y1={y + 15} x2="730" y2={y + 15} stroke="#2D2B28" strokeWidth="1" />
 
-                  {/* 1. LAYER 1 (Background): Backoff rendered as a sleek, non-intrusive 6px sub-track */}
-                  {backoffIntervals.map((item) => {
+                  {/* LAYER 1: Background Backoff Sub-Track (6px) */}
+                  {backoffIntervals.map(item => {
                     const startX = 70 + (Math.max(0, item.startMs) / effectiveMaxTime) * 660;
                     const endX = 70 + (Math.min(effectiveMaxTime, item.endMs) / effectiveMaxTime) * 660;
                     const width = Math.max(3.5, endX - startX);
@@ -546,25 +488,42 @@ export function SimulationTimeline({
                     );
                   })}
 
-                  {/* 2. LAYER 2 (Foreground): Active on-medium events (Transmitting, Delivered, Collision) */}
-                  {/* Rendered at full 18px height so they tower crisply over the backoff track */}
-                  {activeEvents.map((item) => {
+                  {/* LAYER 2: Foreground Active Events (18px) */}
+                  {activeEvents.map(item => {
                     const startX = 70 + (Math.max(0, item.startMs) / effectiveMaxTime) * 660;
                     const endX = 70 + (Math.min(effectiveMaxTime, item.endMs) / effectiveMaxTime) * 660;
-                    const width = Math.max(4, endX - startX);
+                    const totalWidth = Math.max(4, endX - startX);
+
+                    let renderX = startX;
+                    let renderWidth = totalWidth;
+
+                    // When both Transmitting and Delivered are active, delivered frames visually display both:
+                    // Electric Blue transit body + Emerald Green delivery badge at endpoint
+                    const isDeliveredFrame = !item.id.startsWith('ongoing-tx') && !item.id.includes('precol') && item.type !== 'COLLISION';
+                    if (filterTypes.TRANSMISSION && filterTypes.DELIVERY && isDeliveredFrame) {
+                      const capWidth = Math.max(4, Math.min(14, totalWidth * 0.35));
+                      if (item.type === 'TRANSMISSION') {
+                        renderWidth = Math.max(3, totalWidth - capWidth);
+                      } else if (item.type === 'DELIVERY') {
+                        renderX = Math.max(startX, endX - capWidth);
+                        renderWidth = capWidth;
+                      }
+                    }
 
                     return (
                       <rect
                         key={item.id}
-                        x={startX}
+                        x={renderX}
                         y={y + 6}
-                        width={width}
+                        width={renderWidth}
                         height="18"
-                        rx="2.5"
+                        rx="2"
                         fill={colorForType(item.type)}
                         stroke="#101111"
                         strokeWidth="0.75"
-                        style={{ filter: item.type === 'DELIVERY' ? 'drop-shadow(0 0 2px rgba(46,204,113,0.4))' : undefined }}
+                        style={{
+                          filter: item.type === 'DELIVERY' ? 'drop-shadow(0 0 3px rgba(46, 204, 113, 0.5))' : undefined,
+                        }}
                       >
                         <title>{`${sid} [${item.type}] ${formatNumber(item.startMs, 1)}ms - ${formatNumber(item.endMs, 1)}ms: ${item.message}`}</title>
                       </rect>
@@ -576,7 +535,8 @@ export function SimulationTimeline({
           </svg>
         </div>
       ) : (
-        <div className="table-wrap" style={{ maxHeight: 280 }}>
+        /* 3.5 Synchronized Tabular Inspection Mode */
+        <div className="table-wrap" style={{ maxHeight: 240 }}>
           <table>
             <thead>
               <tr>
@@ -591,11 +551,11 @@ export function SimulationTimeline({
               {filteredIntervals.length === 0 ? (
                 <tr>
                   <td colSpan={5} className="muted" style={{ textAlign: 'center' }}>
-                    No timeline intervals match current filters.
+                    No timeline intervals match the current filters.
                   </td>
                 </tr>
               ) : (
-                filteredIntervals.map((item) => (
+                filteredIntervals.slice(-30).map(item => (
                   <tr key={item.id}>
                     <td className="numeric-cell">
                       {formatNumber(item.startMs, 1)} - {formatNumber(item.endMs, 1)}
