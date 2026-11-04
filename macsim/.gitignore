@@ -6,7 +6,7 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
-
+BACKEND_SYSTEM_SPECIFICATION.md
 node_modules
 dist
 dist-ssr

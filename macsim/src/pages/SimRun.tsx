@@ -1,16 +1,27 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { Link } from 'react-router-dom';
-import { SimulationEngine } from '../engine/SimulationEngine';
-import { getRun, saveRun, type RunRecord } from '../store/runs';
+import { getRun, type RunRecord } from '../store/runs';
 import type {
   SimulationConfig,
   SimulationMetrics,
   SimulationRunStatus,
   StationSnapshot,
+  SimulationEvent,
+  MediumSnapshot,
 } from '../types';
 import { formatNumber, formatProtocol, formatStatus } from '../utils/format';
 import { SimulationTimeline } from '../components/SimulationTimeline';
-import { PauseIcon, PlayIcon, ResetIcon, SaveIcon, StepIcon } from '../components/Icons';
+import { PauseIcon, PlayIcon, ResetIcon, StepIcon } from '../components/Icons';
+import {
+  getSimulation,
+  startSimulation,
+  pauseSimulation,
+  resumeSimulation,
+  stepSimulation,
+  resetSimulation,
+} from '../api/simulations';
+import { subscribeToSimulationStream, getSimulationEvents } from '../api/events';
+import { HttpResponseError, NetworkError } from '../api/client';
 
 const initialMetrics: SimulationMetrics = {
   successfulFrames: 0,
@@ -20,18 +31,12 @@ const initialMetrics: SimulationMetrics = {
   elapsedMs: 0,
 };
 
-function isSimulationConfig(value: unknown): value is SimulationConfig {
-  if (typeof value !== 'object' || value === null) return false;
-  const config = value as Partial<SimulationConfig>;
-  return (
-    typeof config.protocol === 'string' &&
-    typeof config.stationCount === 'number' &&
-    typeof config.frameSizeBytes === 'number' &&
-    typeof config.dataRateBps === 'number' &&
-    typeof config.durationMs === 'number' &&
-    typeof config.trafficModel === 'string'
-  );
-}
+const initialMedium: MediumSnapshot = {
+  status: 'IDLE',
+  activeFrameIds: [],
+  activeStations: [],
+  inCollision: false,
+};
 
 function statusColor(status: SimulationRunStatus): string {
   switch (status) {
@@ -48,162 +53,365 @@ function statusColor(status: SimulationRunStatus): string {
   }
 }
 
-interface InitialSimulation {
-  engine: SimulationEngine | null;
-  savedRun: RunRecord | null;
-  config: SimulationConfig | null;
-  stations: StationSnapshot[];
-  metrics: SimulationMetrics;
-  status: SimulationRunStatus;
-  loadError: string;
-  isSaved: boolean;
-}
-
-function loadSimulation(id: string): InitialSimulation {
-  try {
-    const savedRun = getRun(id);
-    if (savedRun) {
-      return {
-        engine: null,
-        savedRun,
-        config: savedRun.config,
-        stations: savedRun.stations,
-        metrics: savedRun.metrics,
-        status: 'Completed',
-        loadError: '',
-        isSaved: true,
-      };
-    }
-
-    const rawConfig = sessionStorage.getItem(`macsim_pending_${id}`);
-    if (!rawConfig) {
-      return {
-        engine: null,
-        savedRun: null,
-        config: null,
-        stations: [],
-        metrics: initialMetrics,
-        status: 'Ready',
-        loadError: 'This simulation is unavailable. Configure a new simulation or open a saved run from History.',
-        isSaved: false,
-      };
-    }
-    const parsedConfig: unknown = JSON.parse(rawConfig);
-    if (!isSimulationConfig(parsedConfig)) {
-      return {
-        engine: null,
-        savedRun: null,
-        config: null,
-        stations: [],
-        metrics: initialMetrics,
-        status: 'Ready',
-        loadError: 'The simulation configuration is incomplete. Return to New Simulation and configure again.',
-        isSaved: false,
-      };
-    }
-
-    const engine = new SimulationEngine(parsedConfig);
-    return {
-      engine,
-      savedRun: null,
-      config: engine.config,
-      stations: engine.stations.map(station => ({ ...station })),
-      metrics: { ...engine.metrics },
-      status: 'Ready',
-      loadError: '',
-      isSaved: false,
-    };
-  } catch (reason) {
-    return {
-      engine: null,
-      savedRun: null,
-      config: null,
-      stations: [],
-      metrics: initialMetrics,
-      status: 'Error',
-      loadError: reason instanceof Error ? reason.message : 'The simulation could not be loaded.',
-      isSaved: false,
-    };
-  }
-}
-
 type TabType = 'events' | 'timeline' | 'stations' | 'metrics';
 
 export default function SimRun({ runId }: { runId: string }) {
-  const [initial] = useState(() => loadSimulation(runId));
-  const [engine] = useState(initial.engine);
-  const [savedRun, setSavedRun] = useState(initial.savedRun);
-  const [config] = useState(initial.config);
-  const [stations, setStations] = useState(initial.stations);
-  const [metrics, setMetrics] = useState(initial.metrics);
-  const [status, setStatus] = useState<SimulationRunStatus>(initial.status);
-  const loadError = initial.loadError;
-  const [saveError, setSaveError] = useState('');
-  const [isSaved, setIsSaved] = useState(initial.isSaved);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
+  const [actionError, setActionError] = useState('');
+  const [actionPending, setActionPending] = useState(false);
+
+  const [config, setConfig] = useState<SimulationConfig | null>(null);
+  const [stations, setStations] = useState<StationSnapshot[]>([]);
+  const [metrics, setMetrics] = useState<SimulationMetrics>(initialMetrics);
+  const [status, setStatus] = useState<SimulationRunStatus>('Ready');
+  const [medium, setMedium] = useState<MediumSnapshot>(initialMedium);
+  const [events, setEvents] = useState<SimulationEvent[]>([]);
+  const [sseConnected, setSseConnected] = useState(false);
+
+  // Inspection & UI state
   const [speed, setSpeed] = useState(1);
   const [selectedStationId, setSelectedStationId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<TabType>('events');
   const [autoScroll, setAutoScroll] = useState(true);
   const eventListRef = useRef<HTMLDivElement>(null);
-  const hasStarted = useRef(false);
+  const lastSequenceRef = useRef<number>(0);
+  const unsubscribeStreamRef = useRef<(() => void) | null>(null);
+
+  // Load authoritative simulation from backend
+  const loadAuthoritativeSimulation = useCallback(async () => {
+    setLoading(true);
+    setLoadError('');
+    setActionError('');
+
+    try {
+      const snapshot = await getSimulation(runId);
+      setConfig(snapshot.configuration);
+      setStations(snapshot.stations || []);
+      setMetrics(snapshot.metrics || initialMetrics);
+      setStatus(snapshot.status || 'Ready');
+      if (snapshot.medium) {
+        setMedium(snapshot.medium);
+      }
+
+      // Fetch any past events already recorded on backend
+      try {
+        const pastEvents = await getSimulationEvents(runId, { limit: 500 });
+        if (Array.isArray(pastEvents) && pastEvents.length > 0) {
+          setEvents(pastEvents);
+          const maxSeq = pastEvents.reduce(
+            (max, e) => Math.max(max, e.sequenceNumber ?? e.sequence_number ?? 0),
+            0,
+          );
+          lastSequenceRef.current = maxSeq;
+        }
+      } catch {
+        // Non-fatal, live stream will catch up
+      }
+
+      setLoading(false);
+    } catch (err: unknown) {
+      // Check if it exists in local storage (backward compatibility for previously saved runs)
+      const localRun: RunRecord | undefined = getRun(runId);
+      if (localRun) {
+        setConfig(localRun.config);
+        setStations(localRun.stations || []);
+        setMetrics(localRun.metrics || initialMetrics);
+        setStatus('Completed');
+        setEvents(localRun.events || []);
+        setLoading(false);
+        return;
+      }
+
+      if (err instanceof HttpResponseError && err.statusCode === 404) {
+        setLoadError(
+          `Simulation "${runId}" was not found on the server. Configure a new simulation or select a saved run from History.`,
+        );
+      } else if (err instanceof NetworkError) {
+        setLoadError(err.message);
+      } else {
+        setLoadError(
+          err instanceof Error
+            ? err.message
+            : 'Unable to load simulation from backend server.',
+        );
+      }
+      setLoading(false);
+    }
+  }, [runId]);
 
   useEffect(() => {
-    if (!engine) return;
-    const unsubscribe = engine.subscribe(current => {
-      setStations(current.stations.map(station => ({ ...station })));
-      setMetrics({ ...current.metrics });
-      setStatus(
-        current.completed
-          ? 'Completed'
-          : current.running
-            ? 'Running'
-            : hasStarted.current
-              ? 'Paused'
-              : 'Ready',
-      );
-    });
-    hasStarted.current = true;
-    engine.start();
-    return () => {
-      unsubscribe();
-      engine.destroy();
-    };
-  }, [engine]);
+    loadAuthoritativeSimulation();
+  }, [loadAuthoritativeSimulation]);
 
+  // Connect Server-Sent Events stream
+  useEffect(() => {
+    if (loading || loadError) return;
+
+    const cleanup = subscribeToSimulationStream(
+      runId,
+      {
+        onOpen: () => {
+          setSseConnected(true);
+        },
+        onError: () => {
+          setSseConnected(false);
+        },
+        onSnapshot: (snapshot) => {
+          if (snapshot.status) setStatus(snapshot.status);
+          if (snapshot.stations) setStations(snapshot.stations);
+          if (snapshot.metrics) setMetrics(snapshot.metrics);
+          if (snapshot.medium) setMedium(snapshot.medium);
+        },
+        onEvent: (event) => {
+          const seq = event.sequenceNumber ?? event.sequence_number ?? 0;
+          if (seq > 0 && seq <= lastSequenceRef.current) {
+            // Duplicate event, skip
+            return;
+          }
+          if (seq > 0) {
+            lastSequenceRef.current = seq;
+          }
+
+          setEvents((prev) => {
+            // Prevent duplicate event IDs
+            if (prev.some((e) => e.eventId === event.eventId)) return prev;
+            return [...prev, event];
+          });
+
+          // Update real-time station & channel state from authoritative events
+          const payload = event.payload || {};
+          const eventType = event.eventType;
+
+          if (eventType === 'SIMULATION_STARTED') {
+            setStatus('Running');
+          } else if (eventType === 'SIMULATION_PAUSED') {
+            setStatus('Paused');
+          } else if (eventType === 'SIMULATION_RESUMED') {
+            setStatus('Running');
+          } else if (eventType === 'SIMULATION_COMPLETED') {
+            setStatus('Completed');
+            setMedium({
+              status: 'IDLE',
+              activeFrameIds: [],
+              activeStations: [],
+              inCollision: false,
+            });
+          } else if (eventType === 'SIMULATION_RESET') {
+            setStatus('Ready');
+            setEvents([]);
+            lastSequenceRef.current = 0;
+            setMedium(initialMedium);
+          } else if (eventType === 'METRICS_UPDATED' && payload.metrics) {
+            setMetrics(payload.metrics as SimulationMetrics);
+          } else if (eventType === 'TRANSMISSION_STARTED') {
+            const stId = event.stationIds?.[0];
+            if (stId) {
+              setStations((prev) =>
+                prev.map((s) =>
+                  s.stationId === stId
+                    ? { ...s, status: 'TRANSMITTING', currentFrameId: event.frameId ?? s.currentFrameId }
+                    : s,
+                ),
+              );
+              setMedium((prev) => ({
+                status: prev.status === 'COLLISION' ? 'COLLISION' : 'BUSY',
+                activeStations: Array.from(new Set([...prev.activeStations, stId])),
+                activeFrameIds: event.frameId
+                  ? Array.from(new Set([...prev.activeFrameIds, event.frameId]))
+                  : prev.activeFrameIds,
+                inCollision: prev.inCollision,
+              }));
+            }
+          } else if (eventType === 'COLLISION_DETECTED') {
+            const affectedStations = event.stationIds || [];
+            setStations((prev) =>
+              prev.map((s) =>
+                affectedStations.includes(s.stationId)
+                  ? { ...s, status: 'COLLISION' }
+                  : s,
+              ),
+            );
+            setMedium((prev) => ({
+              ...prev,
+              status: 'COLLISION',
+              inCollision: true,
+            }));
+          } else if (eventType === 'BACKOFF_STARTED') {
+            const stId = event.stationIds?.[0];
+            const delayUs = Number((payload as Record<string, unknown>).delayUs ?? 0);
+            if (stId) {
+              setStations((prev) =>
+                prev.map((s) =>
+                  s.stationId === stId
+                    ? { ...s, status: 'BACKOFF', backoffRemaining: delayUs / 1000 }
+                    : s,
+                ),
+              );
+            }
+          } else if (eventType === 'TRANSMISSION_COMPLETED' || eventType === 'FRAME_DELIVERED') {
+            const stId = event.stationIds?.[0];
+            if (stId) {
+              setStations((prev) =>
+                prev.map((s) =>
+                  s.stationId === stId
+                    ? { ...s, status: 'IDLE', currentFrameId: undefined }
+                    : s,
+                ),
+              );
+            }
+          } else if (eventType === 'STATION_STATE_CHANGED' && payload.state) {
+            const stId = event.stationIds?.[0];
+            if (stId) {
+              setStations((prev) =>
+                prev.map((s) =>
+                  s.stationId === stId
+                    ? { ...s, status: payload.state as StationSnapshot['status'] }
+                    : s,
+                ),
+              );
+            }
+          } else if (eventType === 'MEDIUM_STATE_CHANGED' && payload.status) {
+            const medStatus = String(payload.status).toUpperCase();
+            setMedium((prev) => ({
+              ...prev,
+              status: medStatus === 'COLLISION' ? 'COLLISION' : medStatus === 'BUSY' ? 'BUSY' : 'IDLE',
+              inCollision: medStatus === 'COLLISION',
+            }));
+          }
+        },
+      },
+      { afterSequence: lastSequenceRef.current },
+    );
+
+    unsubscribeStreamRef.current = cleanup;
+
+    return () => {
+      cleanup();
+      unsubscribeStreamRef.current = null;
+    };
+  }, [runId, loading, loadError]);
+
+  // Auto-scroll event log
   useEffect(() => {
     if (autoScroll && eventListRef.current) {
       eventListRef.current.scrollTop = eventListRef.current.scrollHeight;
     }
-  }, [metrics.elapsedMs, autoScroll]);
+  }, [events.length, autoScroll]);
 
-  const runEngineAction = (action: () => void) => {
+  // Simulation Control Handlers
+  const handleStart = async () => {
+    if (actionPending) return;
+    setActionPending(true);
+    setActionError('');
     try {
-      action();
-      setSaveError('');
-    } catch (reason) {
-      setSaveError(reason instanceof Error ? reason.message : 'The simulation action could not be completed.');
+      const updated = await startSimulation(runId);
+      setStatus(updated.status);
+      if (updated.stations) setStations(updated.stations);
+      if (updated.metrics) setMetrics(updated.metrics);
+      if (updated.medium) setMedium(updated.medium);
+    } catch (err: unknown) {
+      setActionError(
+        err instanceof Error ? err.message : 'Failed to start simulation',
+      );
+    } finally {
+      setActionPending(false);
     }
   };
 
-  const saveCompletedRun = () => {
-    if (!engine || !config || !engine.completed) return;
+  const handlePause = async () => {
+    if (actionPending) return;
+    setActionPending(true);
+    setActionError('');
     try {
-      const record: RunRecord = {
-        id: runId,
-        config: engine.config,
-        metrics: { ...engine.metrics },
-        createdAt: new Date().toISOString(),
-        events: [...engine.events],
-        stations: engine.stations.map(station => ({ ...station })),
-      };
-      saveRun(record);
-      setSavedRun(record);
-      setIsSaved(true);
-      setSaveError('');
-    } catch (reason) {
-      setSaveError(reason instanceof Error ? reason.message : 'The completed run could not be saved.');
+      const updated = await pauseSimulation(runId);
+      setStatus(updated.status);
+      if (updated.stations) setStations(updated.stations);
+      if (updated.metrics) setMetrics(updated.metrics);
+      if (updated.medium) setMedium(updated.medium);
+    } catch (err: unknown) {
+      setActionError(
+        err instanceof Error ? err.message : 'Failed to pause simulation',
+      );
+    } finally {
+      setActionPending(false);
     }
   };
+
+  const handleResume = async () => {
+    if (actionPending) return;
+    setActionPending(true);
+    setActionError('');
+    try {
+      const updated = await resumeSimulation(runId);
+      setStatus(updated.status);
+      if (updated.stations) setStations(updated.stations);
+      if (updated.metrics) setMetrics(updated.metrics);
+      if (updated.medium) setMedium(updated.medium);
+    } catch (err: unknown) {
+      setActionError(
+        err instanceof Error ? err.message : 'Failed to resume simulation',
+      );
+    } finally {
+      setActionPending(false);
+    }
+  };
+
+  const handleStep = async () => {
+    if (actionPending) return;
+    setActionPending(true);
+    setActionError('');
+    try {
+      const updated = await stepSimulation(runId, 1);
+      setStatus(updated.status);
+      if (updated.stations) setStations(updated.stations);
+      if (updated.metrics) setMetrics(updated.metrics);
+      if (updated.medium) setMedium(updated.medium);
+    } catch (err: unknown) {
+      setActionError(
+        err instanceof Error ? err.message : 'Failed to step simulation',
+      );
+    } finally {
+      setActionPending(false);
+    }
+  };
+
+  const handleReset = async () => {
+    if (actionPending) return;
+    setActionPending(true);
+    setActionError('');
+    try {
+      const updated = await resetSimulation(runId);
+      setStatus(updated.status);
+      if (updated.stations) setStations(updated.stations);
+      if (updated.metrics) setMetrics(updated.metrics);
+      if (updated.medium) setMedium(updated.medium);
+      setEvents([]);
+      lastSequenceRef.current = 0;
+    } catch (err: unknown) {
+      setActionError(
+        err instanceof Error ? err.message : 'Failed to reset simulation',
+      );
+    } finally {
+      setActionPending(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="sim-run-workspace">
+        <header className="page-header">
+          <div>
+            <h1>Loading Simulation Workspace...</h1>
+            <p className="mono">ID: {runId}</p>
+          </div>
+        </header>
+        <div className="panel" style={{ padding: 24, textAlign: 'center' }}>
+          <p className="muted">Connecting to backend simulation authority...</p>
+        </div>
+      </div>
+    );
+  }
 
   if (loadError) {
     return (
@@ -214,7 +422,10 @@ export default function SimRun({ runId }: { runId: string }) {
           </div>
         </header>
         <div className="error-message" role="alert">{loadError}</div>
-        <p style={{ marginTop: 16 }}>
+        <p style={{ marginTop: 16, display: 'flex', gap: 12 }}>
+          <button className="btn" type="button" onClick={loadAuthoritativeSimulation}>
+            Retry Connection
+          </button>
           <Link className="btn primary" to="/simulations/new">
             Configure a New Simulation
           </Link>
@@ -225,14 +436,17 @@ export default function SimRun({ runId }: { runId: string }) {
 
   if (!config) return <p role="status">Loading simulation configuration...</p>;
 
-  const events = savedRun?.events ?? engine?.events ?? [];
   const activeStation = selectedStationId
-    ? stations.find(s => s.stationId === selectedStationId)
+    ? stations.find((s) => s.stationId === selectedStationId)
     : undefined;
-  const isTransmittingOnChannel = stations.some(
-    s => s.status === 'TRANSMITTING' || s.status === 'COLLISION',
-  );
-  const isCollisionOnChannel = stations.some(s => s.status === 'COLLISION');
+
+  const isCollisionOnChannel =
+    medium.status === 'COLLISION' ||
+    stations.some((s) => s.status === 'COLLISION');
+
+  const isTransmittingOnChannel =
+    medium.status === 'BUSY' ||
+    stations.some((s) => s.status === 'TRANSMITTING' || s.status === 'COLLISION');
 
   return (
     <div className="sim-run-workspace">
@@ -241,7 +455,7 @@ export default function SimRun({ runId }: { runId: string }) {
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 4 }}>
             <h1 style={{ margin: 0, fontSize: 24 }}>
-              {savedRun ? 'Simulation Results' : 'Live Simulation'}
+              {status === 'Completed' ? 'Simulation Results' : 'Live Simulation'}
             </h1>
             <span className="mono" style={{ color: '#928A7F', fontSize: 13 }}>
               {runId.slice(0, 8)}
@@ -255,6 +469,18 @@ export default function SimRun({ runId }: { runId: string }) {
               aria-live="polite"
             >
               {status.toUpperCase()}
+            </span>
+            <span
+              className="mono"
+              style={{
+                fontSize: 11,
+                color: sseConnected ? '#78B978' : '#928A7F',
+                border: '1px solid currentColor',
+                padding: '2px 6px',
+              }}
+              title={sseConnected ? 'Real-time Server-Sent Events connected' : 'Connecting stream...'}
+            >
+              {sseConnected ? 'LIVE STREAM' : 'OFFLINE'}
             </span>
           </div>
           <p style={{ margin: 0 }}>
@@ -279,73 +505,53 @@ export default function SimRun({ runId }: { runId: string }) {
             <button
               className="btn"
               type="button"
-              disabled={!engine}
-              onClick={() => {
-                if (!engine) return;
-                runEngineAction(() => engine.pause());
-              }}
+              disabled={actionPending}
+              onClick={handlePause}
             >
               <PauseIcon />
               Pause
+            </button>
+          ) : status === 'Paused' ? (
+            <button
+              className="btn primary"
+              type="button"
+              disabled={actionPending}
+              onClick={handleResume}
+            >
+              <PlayIcon />
+              Resume
             </button>
           ) : (
             <button
               className="btn primary"
               type="button"
-              disabled={!engine || status === 'Completed'}
-              onClick={() => {
-                if (!engine) return;
-                hasStarted.current = true;
-                runEngineAction(() => engine.start());
-              }}
+              disabled={actionPending || status === 'Completed'}
+              onClick={handleStart}
             >
               <PlayIcon />
-              {status === 'Paused' ? 'Resume' : 'Start'}
+              Start
             </button>
           )}
 
           <button
             className="btn"
             type="button"
-            disabled={!engine || status === 'Running' || status === 'Completed'}
-            onClick={() => {
-              if (!engine) return;
-              hasStarted.current = true;
-              runEngineAction(() => engine.step());
-            }}
+            disabled={actionPending || status === 'Running' || status === 'Completed'}
+            onClick={handleStep}
           >
             <StepIcon />
-            Step ({engine ? formatNumber(engine.tickDurationMs, 2) : '0.1'} ms)
+            Step
           </button>
 
           <button
             className="btn"
             type="button"
-            disabled={!engine}
-            onClick={() => {
-              if (!engine) return;
-              hasStarted.current = false;
-              runEngineAction(() => engine.reset());
-              setStatus('Ready');
-              setIsSaved(false);
-            }}
+            disabled={actionPending}
+            onClick={handleReset}
           >
             <ResetIcon />
             Reset
           </button>
-
-          {status === 'Completed' && (
-            <button
-              className="btn"
-              type="button"
-              disabled={isSaved}
-              onClick={saveCompletedRun}
-              style={{ borderColor: '#DDB487', color: isSaved ? '#928A7F' : '#DDB487' }}
-            >
-              <SaveIcon />
-              {isSaved ? 'Run Saved Locally' : 'Save Completed Run'}
-            </button>
-          )}
         </div>
 
         <div className="toolbar-controls-right">
@@ -356,12 +562,8 @@ export default function SimRun({ runId }: { runId: string }) {
             <select
               id="playback-speed"
               value={speed}
-              disabled={!engine || status === 'Completed'}
-              onChange={event => {
-                const nextSpeed = Number(event.target.value);
-                setSpeed(nextSpeed);
-                if (engine) runEngineAction(() => engine.setPlaybackSpeed(nextSpeed));
-              }}
+              disabled={status === 'Completed'}
+              onChange={(event) => setSpeed(Number(event.target.value))}
               style={{ width: 'auto', minHeight: 30, padding: '2px 8px' }}
             >
               <option value="0.25">0.25x</option>
@@ -374,7 +576,7 @@ export default function SimRun({ runId }: { runId: string }) {
         </div>
       </section>
 
-      {saveError && <div className="error-message" role="alert">{saveError}</div>}
+      {actionError && <div className="error-message" role="alert">{actionError}</div>}
 
       {/* Main Simulation Layout: Topology + Details */}
       <div className="simulation-layout">
@@ -401,7 +603,9 @@ export default function SimRun({ runId }: { runId: string }) {
             <div className="topology-scroll" tabIndex={0} aria-label="Shared bus medium and connected station nodes">
               <div className="bus-visualizer">
                 {/* Horizontal Shared Bus Backbone */}
-                <div className={`bus-channel-bar${isCollisionOnChannel ? ' collision' : isTransmittingOnChannel ? ' active' : ''}`}>
+                <div
+                  className={`bus-channel-bar${isCollisionOnChannel ? ' collision' : isTransmittingOnChannel ? ' active' : ''}`}
+                >
                   <span className="bus-terminator left">50Ω</span>
                   <span className="bus-title-text mono">SHARED TRANSMISSION MEDIUM</span>
                   <span className="bus-terminator right">50Ω</span>
@@ -409,7 +613,7 @@ export default function SimRun({ runId }: { runId: string }) {
 
                 {/* Stations Grid with Tap Lines */}
                 <div className="station-tap-grid">
-                  {stations.map(station => {
+                  {stations.map((station) => {
                     const isSelected = selectedStationId === station.stationId;
                     const isTx = station.status === 'TRANSMITTING';
                     const isColl = station.status === 'COLLISION';
@@ -556,13 +760,13 @@ export default function SimRun({ runId }: { runId: string }) {
               <div className="tab-pane">
                 <div className="event-controls-row">
                   <span className="muted" style={{ fontSize: 12 }}>
-                    Sequential simulation events ordered by virtual timestamp.
+                    Authoritative discrete events ordered by sequence number and virtual timestamp.
                   </span>
                   <label className="checkbox-label" style={{ fontSize: 12 }}>
                     <input
                       type="checkbox"
                       checked={autoScroll}
-                      onChange={e => setAutoScroll(e.target.checked)}
+                      onChange={(e) => setAutoScroll(e.target.checked)}
                     />
                     Auto-scroll to latest
                   </label>
@@ -580,13 +784,14 @@ export default function SimRun({ runId }: { runId: string }) {
                     aria-label="Simulation event stream"
                     tabIndex={0}
                   >
-                    {events.map(ev => {
+                    {events.map((ev) => {
                       let tagColor = '#928A7F';
-                      if (ev.eventType.includes('Collision')) tagColor = '#D96A62';
-                      else if (ev.eventType.includes('delivered')) tagColor = '#78B978';
-                      else if (ev.eventType.includes('Transmission') || ev.eventType.includes('Retransmission'))
+                      const typeStr = ev.eventType.toUpperCase();
+                      if (typeStr.includes('COLLISION')) tagColor = '#D96A62';
+                      else if (typeStr.includes('DELIVERED') || typeStr.includes('COMPLETED')) tagColor = '#78B978';
+                      else if (typeStr.includes('TRANSMISSION') || typeStr.includes('RETRANSMISSION'))
                         tagColor = '#78A9E8';
-                      else if (ev.eventType.includes('Backoff') || ev.eventType.includes('busy'))
+                      else if (typeStr.includes('BACKOFF') || typeStr.includes('BUSY'))
                         tagColor = '#D5A45D';
 
                       return (
@@ -599,7 +804,7 @@ export default function SimRun({ runId }: { runId: string }) {
                               className="event-type mono"
                               style={{ color: tagColor, fontWeight: 600 }}
                             >
-                              [{ev.eventType.toUpperCase()}]
+                              [{typeStr}]
                               {ev.frameId ? ` · ${ev.frameId}` : ''}
                             </span>
                             <p className="event-message">{ev.message}</p>
@@ -619,7 +824,7 @@ export default function SimRun({ runId }: { runId: string }) {
                   events={events}
                   durationMs={config.durationMs}
                   currentTimeMs={metrics.elapsedMs}
-                  stationIds={stations.map(s => s.stationId)}
+                  stationIds={stations.map((s) => s.stationId)}
                 />
               </div>
             )}
@@ -640,7 +845,7 @@ export default function SimRun({ runId }: { runId: string }) {
                       </tr>
                     </thead>
                     <tbody>
-                      {stations.map(station => (
+                      {stations.map((station) => (
                         <tr key={station.stationId}>
                           <td className="mono"><strong>{station.stationId}</strong></td>
                           <td>
@@ -671,20 +876,25 @@ export default function SimRun({ runId }: { runId: string }) {
 
                   <dt>Collision Incidents</dt>
                   <dd>
-                    Total collision events detected when two or more transmissions overlapped on the shared medium.
+                    Distinct collision events that occurred on the medium when transmissions overlapped.
+                  </dd>
+
+                  <dt>Collided Attempts</dt>
+                  <dd>
+                    Total count of individual station transmission attempts ruined by collision overlap.
                   </dd>
 
                   <dt>Retransmissions</dt>
-                  <dd>Total repeat transmission attempts initiated after collision-induced backoff periods.</dd>
+                  <dd>Total repeat transmission attempts initiated after collision backoff periods.</dd>
 
                   <dt>Throughput (bps)</dt>
                   <dd>
-                    Gross delivered payload data bits divided by total elapsed simulation time (bits/sec).
+                    Delivered data bits divided by elapsed simulation time in seconds.
                   </dd>
 
                   <dt>Channel Utilization</dt>
                   <dd>
-                    Ratio of active channel transmission ticks to total elapsed ticks. Indicates efficiency of medium usage.
+                    Ratio of active channel transmission time to total elapsed simulation time.
                   </dd>
 
                   <dt>Average Delay (ms)</dt>

@@ -1,0 +1,145 @@
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Simulation {
+  id                  String             @id @default(uuid())
+  name                String?
+  protocol            String
+  status              String             @default("IDLE")
+  current_time        Float              @default(0.0)
+  max_simulation_time Float              @default(1000000.0)
+  random_seed         Int?
+  config              String             // JSON configuration string
+  created_at          DateTime           @default(now())
+  updated_at          DateTime           @updatedAt
+
+  stations            Station[]
+  frames              Frame[]
+  events              SimulationEvent[]
+  metrics             SimulationMetrics?
+
+  @@index([status])
+  @@index([created_at])
+}
+
+model Station {
+  id                     String     @id @default(uuid())
+  simulation_id          String
+  station_index          Int
+  name                   String
+  state                  String     @default("IDLE")
+  frames_generated       Int        @default(0)
+  frames_transmitted     Int        @default(0)
+  frames_collided        Int        @default(0)
+  frames_dropped         Int        @default(0)
+  backoff_count          Int        @default(0)
+  current_backoff_window Int        @default(0)
+  next_attempt_time      Float?
+  queue_length           Int        @default(0)
+
+  simulation             Simulation @relation(fields: [simulation_id], references: [id], onDelete: Cascade)
+  frames                 Frame[]
+
+  @@index([simulation_id])
+}
+
+model Frame {
+  id                      String                @id @default(uuid())
+  simulation_id           String
+  frame_id                Int
+  station_id              String
+  size_bytes              Int
+  generation_time         Float
+  transmission_start_time Float?
+  transmission_end_time   Float?
+  status                  String                @default("QUEUED")
+  attempt_count           Int                   @default(0)
+  collision_count         Int                   @default(0)
+
+  simulation              Simulation            @relation(fields: [simulation_id], references: [id], onDelete: Cascade)
+  station                 Station               @relation(fields: [station_id], references: [id], onDelete: Cascade)
+  attempts                TransmissionAttempt[]
+
+  @@index([simulation_id])
+  @@index([station_id])
+}
+
+model TransmissionAttempt {
+  id             String   @id @default(uuid())
+  frame_id       String
+  attempt_number Int
+  start_time     Float
+  end_time       Float
+  status         String
+
+  frame          Frame    @relation(fields: [frame_id], references: [id], onDelete: Cascade)
+
+  @@index([frame_id])
+}
+
+model SimulationEvent {
+  id              String     @id @default(uuid())
+  simulation_id   String
+  sequence_number Int
+  timestamp       Float
+  event_type      String
+  station_id      String?
+  frame_id        String?
+  details         String     // JSON payload details
+
+  simulation      Simulation @relation(fields: [simulation_id], references: [id], onDelete: Cascade)
+
+  @@index([simulation_id, sequence_number])
+  @@index([simulation_id, timestamp])
+}
+
+model SimulationMetrics {
+  id                       String     @id @default(uuid())
+  simulation_id            String     @unique
+  total_frames_generated   Int        @default(0)
+  total_frames_transmitted Int        @default(0)
+  total_collisions         Int        @default(0)
+  total_dropped            Int        @default(0)
+  collision_rate           Float      @default(0.0)
+  throughput_bps           Float      @default(0.0)
+  channel_efficiency       Float      @default(0.0)
+  average_latency_us       Float      @default(0.0)
+  average_attempts         Float      @default(0.0)
+  channel_busy_time_us     Float      @default(0.0)
+  channel_idle_time_us     Float      @default(0.0)
+  channel_collision_time_us Float     @default(0.0)
+  theoretical_efficiency   Float?
+
+  simulation               Simulation @relation(fields: [simulation_id], references: [id], onDelete: Cascade)
+}
+
+model Comparison {
+  id         String          @id @default(uuid())
+  name       String?
+  created_at DateTime        @default(now())
+  runs       ComparisonRun[]
+
+  @@index([created_at])
+}
+
+model ComparisonRun {
+  id                 String     @id @default(uuid())
+  comparison_id      String
+  simulation_id      String
+  protocol           String
+  offered_load       Float      @default(0.0)
+  throughput_bps     Float      @default(0.0)
+  channel_efficiency Float      @default(0.0)
+  collision_rate     Float      @default(0.0)
+  average_latency_us Float      @default(0.0)
+
+  comparison         Comparison @relation(fields: [comparison_id], references: [id], onDelete: Cascade)
+
+  @@index([comparison_id])
+}

@@ -5,6 +5,8 @@ import { formatNumber, formatProtocol } from '../utils/format';
 import { ProtocolDiagram } from '../components/ProtocolDiagram';
 import { ArrowLeftIcon, ArrowRightIcon, CheckIcon } from '../components/Icons';
 import { getSimulationDefaults } from '../store/runs';
+import { createSimulation } from '../api/simulations';
+import { HttpResponseError } from '../api/client';
 
 const protocols: { id: Protocol; name: string; description: string }[] = [
   {
@@ -64,6 +66,7 @@ export default function NewSim() {
   // Errors & submission
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [submitError, setSubmitError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
 
   // Validation per step
   const validateStep = (targetStep: WizardStep): boolean => {
@@ -174,7 +177,7 @@ export default function NewSim() {
     }
   };
 
-  const handleStartSimulation = (event: FormEvent) => {
+  const handleStartSimulation = async (event: FormEvent) => {
     event.preventDefault();
     setSubmitError('');
 
@@ -185,6 +188,7 @@ export default function NewSim() {
       }
     }
 
+    setSubmitting(true);
     try {
       const config: SimulationConfig = {
         protocol,
@@ -197,16 +201,24 @@ export default function NewSim() {
         randomSeed: randomSeed.trim() === '' ? undefined : Number(randomSeed),
         slotDurationMs:
           protocol === 'SLOTTED_ALOHA' || protocol === 'CSMA_CD' ? Number(slotDurationMs) : undefined,
-        propagationDelayMs: protocol === 'CSMA_CD' ? Number(propagationDelayMs) : undefined,
+        propagationDelayMs:
+          protocol === 'CSMA_CD' || protocol === 'CSMA' ? Number(propagationDelayMs) : undefined,
         maxRetries: protocol === 'CSMA_CD' ? Number(maxRetries) : undefined,
         maxBackoffSlots: protocol === 'CSMA_CD' ? Number(maxBackoffSlots) : undefined,
       };
 
-      const id = crypto.randomUUID();
-      sessionStorage.setItem(`macsim_pending_${id}`, JSON.stringify(config));
-      navigate(`/simulations/${id}`);
+      const created = await createSimulation(config);
+      navigate(`/simulations/${created.id}`);
     } catch (reason) {
-      setSubmitError(reason instanceof Error ? reason.message : 'The simulation could not be initialized.');
+      if (reason instanceof HttpResponseError) {
+        setSubmitError(reason.apiError.message || `Server rejected simulation configuration (Status ${reason.statusCode}).`);
+      } else if (reason instanceof Error) {
+        setSubmitError(reason.message);
+      } else {
+        setSubmitError('The simulation could not be initialized.');
+      }
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -581,8 +593,8 @@ export default function NewSim() {
                 <ArrowRightIcon />
               </button>
             ) : (
-              <button className="btn primary" type="submit">
-                Start Simulation
+              <button className="btn primary" type="submit" disabled={submitting}>
+                {submitting ? 'Creating...' : 'Start Simulation'}
                 <ArrowRightIcon />
               </button>
             )}

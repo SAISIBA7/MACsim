@@ -1,8 +1,10 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, useCallback } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { getRuns, type RunRecord } from '../store/runs';
 import { formatNumber, formatProtocol } from '../utils/format';
 import type { Protocol } from '../types';
+import { getSimulations, getSimulation } from '../api/simulations';
+import { runSweep } from '../api/comparisons';
 
 type MetricKey =
   | 'throughputBps'
@@ -121,25 +123,132 @@ export default function Comparisons() {
   const [searchParams] = useSearchParams();
   const requestedIds = searchParams.get('ids')?.split(',').filter(Boolean);
 
-  const [{ runs, error }] = useState(() => {
-    try {
-      return { runs: getRuns(), error: '' };
-    } catch (reason) {
-      return {
-        runs: [] as RunRecord[],
-        error: reason instanceof Error ? reason.message : 'Saved simulations could not be read.',
-      };
-    }
-  });
-
-  const [selectedIds, setSelectedIds] = useState<string[]>(() => {
-    if (requestedIds && requestedIds.length > 0) {
-      return requestedIds;
-    }
-    return runs.slice(0, 2).map(r => r.id);
-  });
-
+  const [runs, setRuns] = useState<RunRecord[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [activeMetricKey, setActiveMetricKey] = useState<MetricKey>('throughputBps');
+  const [isSweeping, setIsSweeping] = useState(false);
+  const [sweepMessage, setSweepMessage] = useState('');
+
+  const loadComparisonRuns = useCallback(async () => {
+    setLoading(true);
+    setError('');
+
+    const records: RunRecord[] = [];
+
+    // 1. Fetch server simulations
+    try {
+      const serverSims = await getSimulations({ limit: 50 });
+      for (const sim of serverSims) {
+        records.push({
+          id: sim.id,
+          config: {
+            protocol: sim.protocol,
+            stationCount: sim.configuration?.stationCount ?? sim.configuration?.num_stations ?? 5,
+            frameSizeBytes: sim.configuration?.frameSizeBytes ?? sim.configuration?.frame_size_bytes ?? 1500,
+            dataRateBps: sim.configuration?.dataRateBps ?? sim.configuration?.channel_bandwidth_bps ?? 10_000_000,
+            durationMs: sim.configuration?.durationMs ?? (sim.configuration?.simulation_time_us ? sim.configuration.simulation_time_us / 1000 : 1000),
+            trafficModel: sim.configuration?.trafficModel ?? 'poisson',
+            trafficIntensity: sim.configuration?.trafficIntensity ?? 0.5,
+            randomSeed: sim.configuration?.randomSeed ?? sim.configuration?.random_seed ?? 42,
+          },
+          metrics: sim.metrics || {
+            successfulFrames: 0,
+            collisions: 0,
+            retransmissions: 0,
+            elapsedMs: 0,
+          },
+          createdAt: sim.createdAt,
+          events: [],
+          stations: [],
+        });
+      }
+    } catch {
+      // Server may be offline
+    }
+
+    // 2. Load any local runs
+    try {
+      const local = getRuns();
+      const existingIds = new Set(records.map(r => r.id));
+      for (const l of local) {
+        if (!existingIds.has(l.id)) {
+          records.push(l);
+        }
+      }
+    } catch {
+      // Ignore local storage error
+    }
+
+    // 3. If specific requested IDs are passed, make sure they are included
+    if (requestedIds && requestedIds.length > 0) {
+      for (const id of requestedIds) {
+        if (!records.some(r => r.id === id)) {
+          try {
+            const snap = await getSimulation(id);
+            records.push({
+              id: snap.id,
+              config: snap.configuration,
+              metrics: snap.metrics,
+              createdAt: snap.createdAt,
+              events: [],
+              stations: snap.stations,
+            });
+          } catch {
+            // Not found on server
+          }
+        }
+      }
+    }
+
+    setRuns(records);
+
+    // Set initial selection
+    if (requestedIds && requestedIds.length > 0) {
+      setSelectedIds(requestedIds.filter(id => records.some(r => r.id === id)));
+    } else {
+      setSelectedIds(records.slice(0, 2).map(r => r.id));
+    }
+
+    setLoading(false);
+  }, [requestedIds]);
+
+  useEffect(() => {
+    loadComparisonRuns();
+  }, [loadComparisonRuns]);
+
+  const handleRunSweep = async () => {
+    setIsSweeping(true);
+    setSweepMessage('Executing backend multi-protocol parameter sweep...');
+    setError('');
+
+    try {
+      const result = await runSweep({
+        protocols: ['PURE_ALOHA', 'SLOTTED_ALOHA', 'CSMA', 'CSMA_CD'],
+        startLambda: 20,
+        endLambda: 150,
+        steps: 3,
+        numStations: 5,
+        simulationTimeUs: 200_000,
+        frameSizeBytes: 1500,
+        bandwidthBps: 10_000_000,
+        name: `Automated_Sweep_${new Date().toLocaleTimeString()}`,
+      });
+
+      setSweepMessage(
+        `Sweep completed successfully! Generated ${result.runs.length} comparative benchmark runs across 4 protocols.`,
+      );
+
+      // Refresh list to include new benchmark runs
+      await loadComparisonRuns();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Parameter sweep benchmark failed.');
+      setSweepMessage('');
+    } finally {
+      setIsSweeping(false);
+    }
+  };
 
   const selectedRuns = useMemo(
     () => runs.filter(run => selectedIds.includes(run.id)),
@@ -175,25 +284,57 @@ export default function Comparisons() {
         <div>
           <h1>Protocol Comparison</h1>
           <p>
-            Evaluate protocol efficiency, collision rates, and delay characteristics across saved experimental runs.
+            Evaluate protocol efficiency, collision rates, and delay characteristics across experimental runs.
           </p>
         </div>
-        <Link className="btn primary" to="/simulations/new">
-          New Simulation
-        </Link>
+        <div className="button-row">
+          <button
+            className="btn"
+            type="button"
+            disabled={isSweeping}
+            onClick={handleRunSweep}
+            style={{ borderColor: '#DDB487', color: '#DDB487' }}
+          >
+            {isSweeping ? 'Running Sweep Benchmark...' : 'Run Parameter Sweep Benchmark'}
+          </button>
+          <Link className="btn primary" to="/simulations/new">
+            New Simulation
+          </Link>
+        </div>
       </header>
 
-      {error ? (
-        <div className="error-message" role="alert">{error}</div>
+      {sweepMessage && (
+        <div className="comparison-fair-note" role="status" style={{ marginBottom: 16 }}>
+          <strong style={{ color: '#78B978' }}>Sweep Status: </strong>{sweepMessage}
+        </div>
+      )}
+
+      {error && <div className="error-message" role="alert">{error}</div>}
+
+      {loading ? (
+        <div className="panel" style={{ padding: 24, textAlign: 'center' }}>
+          <p className="muted">Loading simulation comparison data...</p>
+        </div>
       ) : runs.length === 0 ? (
         <div className="empty-state">
-          <h2>No Saved Experiments to Compare</h2>
+          <h2>No Experiments to Compare</h2>
           <p>
-            Complete and save at least two simulations to perform comparative analysis. Real experiment records are never fabricated.
+            Configure at least two simulations or run a parameter sweep benchmark to perform comparative analysis.
           </p>
-          <Link className="btn primary" to="/simulations/new">
-            Configure a Simulation
-          </Link>
+          <div className="button-row" style={{ justifyContent: 'center', marginTop: 12 }}>
+            <button
+              className="btn"
+              type="button"
+              disabled={isSweeping}
+              onClick={handleRunSweep}
+              style={{ borderColor: '#DDB487', color: '#DDB487' }}
+            >
+              {isSweeping ? 'Running Sweep...' : 'Run Parameter Sweep Benchmark'}
+            </button>
+            <Link className="btn primary" to="/simulations/new">
+              Configure a Simulation
+            </Link>
+          </div>
         </div>
       ) : (
         <>

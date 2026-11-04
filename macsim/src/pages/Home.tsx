@@ -1,10 +1,12 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { getRuns, type RunRecord } from '../store/runs';
+import { getRuns } from '../store/runs';
 import { formatDate, formatNumber, formatProtocol } from '../utils/format';
 import { NetworkIllustration } from '../components/NetworkIllustration';
 import { ProtocolDiagram } from '../components/ProtocolDiagram';
 import type { Protocol } from '../types';
+import { getHealth, getProtocols } from '../api/protocols';
+import { getSimulations } from '../api/simulations';
 
 interface ProtocolInfo {
   id: Protocol;
@@ -12,7 +14,7 @@ interface ProtocolInfo {
   description: string;
 }
 
-const protocols: ProtocolInfo[] = [
+const defaultProtocols: ProtocolInfo[] = [
   {
     id: 'PURE_ALOHA',
     name: 'Pure ALOHA',
@@ -35,24 +37,153 @@ const protocols: ProtocolInfo[] = [
   },
 ];
 
+interface RecentRunView {
+  id: string;
+  protocol: Protocol;
+  stationCount: number;
+  frameSizeBytes: number;
+  dataRateBps: number;
+  durationMs: number;
+  trafficModel: string;
+  trafficIntensity: number;
+  successfulFrames: number;
+  collisions: number;
+  throughputBps: number;
+  createdAt: string;
+}
+
 export default function Home() {
-  const [{ runs, error }] = useState(() => {
-    try {
-      return { runs: getRuns(), error: '' };
-    } catch (reason) {
-      return {
-        runs: [] as RunRecord[],
-        error: reason instanceof Error ? reason.message : 'Saved simulations could not be read.',
-      };
-    }
-  });
+  const [protocols, setProtocols] = useState<ProtocolInfo[]>(defaultProtocols);
+  const [backendHealth, setBackendHealth] = useState<{
+    status: 'online' | 'offline' | 'checking';
+    version?: string;
+  }>({ status: 'checking' });
+  const [recentRuns, setRecentRuns] = useState<RecentRunView[]>([]);
+  const [loadingRuns, setLoadingRuns] = useState(true);
+
+  useEffect(() => {
+    // 1. Check Backend Health
+    getHealth()
+      .then((health) => {
+        setBackendHealth({
+          status: 'online',
+          version: health.engineVersion,
+        });
+      })
+      .catch(() => {
+        setBackendHealth({ status: 'offline' });
+      });
+
+    // 2. Fetch Protocols
+    getProtocols()
+      .then((res) => {
+        if (Array.isArray(res.protocols) && res.protocols.length > 0) {
+          const mapped: ProtocolInfo[] = res.protocols.map((p) => ({
+            id: p.id,
+            name: p.name,
+            description: p.description,
+          }));
+          setProtocols(mapped);
+        }
+      })
+      .catch(() => {
+        // Fall back to default protocol descriptions
+      });
+
+    // 3. Fetch Recent Simulations (Server + Local)
+    const loadRecent = async () => {
+      setLoadingRuns(true);
+      const items: RecentRunView[] = [];
+
+      try {
+        const serverSims = await getSimulations({ limit: 5 });
+        for (const s of serverSims) {
+          items.push({
+            id: s.id,
+            protocol: s.protocol,
+            stationCount: s.configuration?.stationCount ?? s.configuration?.num_stations ?? 5,
+            frameSizeBytes: s.configuration?.frameSizeBytes ?? s.configuration?.frame_size_bytes ?? 1500,
+            dataRateBps: s.configuration?.dataRateBps ?? s.configuration?.channel_bandwidth_bps ?? 10_000_000,
+            durationMs: s.configuration?.durationMs ?? (s.configuration?.simulation_time_us ? s.configuration.simulation_time_us / 1000 : 1000),
+            trafficModel: s.configuration?.trafficModel ?? 'poisson',
+            trafficIntensity: s.configuration?.trafficIntensity ?? 0.5,
+            successfulFrames: s.metrics?.successfulFrames ?? 0,
+            collisions: s.metrics?.collisions ?? 0,
+            throughputBps: s.metrics?.throughputBps ?? 0,
+            createdAt: s.createdAt,
+          });
+        }
+      } catch {
+        // Fallback to local
+      }
+
+      try {
+        const local = getRuns();
+        const serverIds = new Set(items.map((i) => i.id));
+        for (const r of local) {
+          if (!serverIds.has(r.id)) {
+            items.push({
+              id: r.id,
+              protocol: r.config.protocol,
+              stationCount: r.config.stationCount,
+              frameSizeBytes: r.config.frameSizeBytes,
+              dataRateBps: r.config.dataRateBps,
+              durationMs: r.config.durationMs,
+              trafficModel: r.config.trafficModel,
+              trafficIntensity: r.config.trafficIntensity,
+              successfulFrames: r.metrics.successfulFrames,
+              collisions: r.metrics.collisions,
+              throughputBps: r.metrics.throughputBps ?? 0,
+              createdAt: r.createdAt,
+            });
+          }
+        }
+      } catch {
+        // Ignore local error
+      }
+
+      items.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      setRecentRuns(items.slice(0, 5));
+      setLoadingRuns(false);
+    };
+
+    loadRecent();
+  }, []);
 
   return (
     <div className="home-workspace">
       {/* Hero Section */}
       <section className="hero-panel" aria-labelledby="hero-title">
         <div className="hero-content">
-          <div className="hero-badge">SIMULATION WORKSPACE V3.0</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+            <span className="hero-badge">SIMULATION WORKSPACE V3.0</span>
+            <span
+              className="mono"
+              style={{
+                fontSize: 11,
+                padding: '2px 8px',
+                border: '1px solid',
+                borderColor:
+                  backendHealth.status === 'online'
+                    ? '#78B978'
+                    : backendHealth.status === 'checking'
+                      ? '#928A7F'
+                      : '#D96A62',
+                color:
+                  backendHealth.status === 'online'
+                    ? '#78B978'
+                    : backendHealth.status === 'checking'
+                      ? '#928A7F'
+                      : '#D96A62',
+              }}
+            >
+              {backendHealth.status === 'online'
+                ? `BACKEND ONLINE (v${backendHealth.version || '1.0.0'})`
+                : backendHealth.status === 'checking'
+                  ? 'CHECKING ENGINE...'
+                  : 'BACKEND OFFLINE'}
+            </span>
+          </div>
           <h1 id="hero-title" className="hero-title">MACSim</h1>
           <p className="hero-subtitle">Medium Access Control Protocol Simulator</p>
           <p className="hero-description">
@@ -77,7 +208,7 @@ export default function Home() {
         </div>
 
         <div className="protocol-grid">
-          {protocols.map(item => (
+          {protocols.map((item) => (
             <div className="protocol-card" key={item.id}>
               <div className="protocol-card-header">
                 <div>
@@ -108,19 +239,21 @@ export default function Home() {
         <div className="table-toolbar">
           <div>
             <h2 className="section-heading" id="recent-heading">Recent Simulations</h2>
-            <p className="section-subtext">Experiments configured and completed in this browser session.</p>
+            <p className="section-subtext">Experiments configured and recorded in the database or local storage.</p>
           </div>
           <Link className="btn" to="/history">
             View All History
           </Link>
         </div>
 
-        {error ? (
-          <div className="error-message" role="alert">{error}</div>
-        ) : runs.length === 0 ? (
+        {loadingRuns ? (
+          <div className="panel" style={{ padding: 20, textAlign: 'center' }}>
+            <p className="muted">Loading recent simulation runs...</p>
+          </div>
+        ) : recentRuns.length === 0 ? (
           <div className="empty-state">
             <h3>No Saved Simulations</h3>
-            <p>Completed runs saved locally will appear here with their measured metrics and configuration parameters.</p>
+            <p>Completed runs saved in the backend database or locally will appear here with measured metrics and parameters.</p>
             <Link className="btn primary" to="/simulations/new">
               Create the First Simulation
             </Link>
@@ -142,26 +275,26 @@ export default function Home() {
                 </tr>
               </thead>
               <tbody>
-                {runs.slice(0, 5).map(run => (
+                {recentRuns.map((run) => (
                   <tr key={run.id}>
                     <td className="mono" style={{ fontSize: 12 }}>
                       {run.id.slice(0, 8)}...
                     </td>
                     <td>
-                      <strong>{formatProtocol(run.config.protocol)}</strong>
+                      <strong>{formatProtocol(run.protocol)}</strong>
                     </td>
-                    <td className="numeric-cell">{run.config.stationCount}</td>
+                    <td className="numeric-cell">{run.stationCount}</td>
                     <td>
-                      {run.config.frameSizeBytes} B @ {(run.config.dataRateBps / 1000).toLocaleString()} kbps
+                      {run.frameSizeBytes} B @ {(run.dataRateBps / 1000).toLocaleString()} kbps
                       <br />
                       <span className="muted" style={{ fontSize: 11 }}>
-                        {run.config.durationMs} ms, {run.config.trafficModel} ({run.config.trafficIntensity})
+                        {run.durationMs} ms, {run.trafficModel} ({run.trafficIntensity})
                       </span>
                     </td>
-                    <td className="numeric-cell">{formatNumber(run.metrics.successfulFrames)}</td>
-                    <td className="numeric-cell">{formatNumber(run.metrics.collisions)}</td>
+                    <td className="numeric-cell">{formatNumber(run.successfulFrames)}</td>
+                    <td className="numeric-cell">{formatNumber(run.collisions)}</td>
                     <td className="numeric-cell mono">
-                      {formatNumber(run.metrics.throughputBps, 1)} bps
+                      {formatNumber(run.throughputBps, 1)} bps
                     </td>
                     <td>{formatDate(run.createdAt)}</td>
                     <td>

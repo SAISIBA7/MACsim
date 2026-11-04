@@ -59,7 +59,6 @@ export function formatSimulationDetail(engineOrModel: SimulationEngine | Simulat
 
   const id = engineOrModel.id;
   const protocol = engineOrModel.protocol;
-  const rawStatus = engineOrModel.status;
 
   const strStatus = String(engineOrModel.status || '').toUpperCase();
   let status = 'Ready';

@@ -1,5 +1,3 @@
-import { ProtocolType } from '../config/constants.js';
-
 export type TrafficDistribution = 'POISSON' | 'UNIFORM' | 'BURST' | 'CONSTANT';
 
 export type BackoffAlgorithm =

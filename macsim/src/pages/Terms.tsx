@@ -33,9 +33,9 @@ export default function Terms() {
         </section>
 
         <section>
-          <h2 style={{ fontSize: 16, marginBottom: 8 }}>3. User Conduct & Local Execution</h2>
+          <h2 style={{ fontSize: 16, marginBottom: 8 }}>3. User Conduct & Application Architecture</h2>
           <p>
-            MACSim executes locally within the user client browser. Users may configure experiments, adjust workloads, export simulation logs, and evaluate results freely for non-commercial educational study, instruction, and research.
+            MACSim executes locally within the user host environment via a dedicated discrete-event simulation engine and interactive web interface. Users may configure experiments, adjust workloads, export simulation logs, and evaluate results freely for non-commercial educational study, instruction, and research.
           </p>
         </section>
 
